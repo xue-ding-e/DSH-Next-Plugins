@@ -1,0 +1,7 @@
+{
+  "_modificationNotice": "Modified 2026-11-05: removed the unavailable screenshot claim.",
+  "meta": {
+    "title": "Browser control",
+    "description": "Let the model drive the sidebar browser tab: navigate, snapshot, click, fill and read text, reusing that tab's cookies and login state."
+  }
+}

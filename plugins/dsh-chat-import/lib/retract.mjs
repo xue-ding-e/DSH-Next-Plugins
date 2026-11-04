@@ -1,0 +1,196 @@
+// lib/retract.mjs — 导入识别 / 撤回（只读）
+//
+// 上游缺口：平台 sessionPersistence 无 delete 面（create / append / locate /
+// readRaw / prepare / load / inspect / readFrom / list / listSnapshots，无
+// remove），fs 亦无 removeFile——「撤回」= 识别 + 引导手动删工件 + 移除 imports
+// registry 记录（removeImport），绝不调用任何删除。
+//
+// list_imported_sessions：只读枚举 list() 的每个会话，imports registry 的 dshId 反查
+// 是权威信号（会话日志不写导入标记）；旧日志里残留的 session/imported 标记仍作兜底
+// 证据（registry 记录被撤回后标记留在日志里）。命中会话用 locate() 取工件路径、
+// 同一份事件里取 session/title 标题。
+//
+// retract_import：按 sessionId（imports registry 反查优先、旧日志标记兜底）或
+// sourcePath 定位 registry 键 → removeImport 移除记录 → 返回手动删除引导。幂等：
+// 标记留在日志里，记录移除后再次撤回仍能定位、removeImport 空转。
+
+import { loadImports, removeImport, unwrapRecord, readSessionEvents, listPersistedHeaders, canReadSessionEvents, registryEntries, recordEntries, recordSessionIds } from './imports.mjs'
+import { rememberIgnore, sourceIgnoreKey } from './ignore.mjs'
+
+// 以下三个读取件与 retractIgnoreKey 同时服务撤回（本模块）与删除（lib/purge.mjs）。
+
+// 读会话日志一次：{ marker, events }。marker 为 session/imported 首事件或 null；
+// readFrom 不可用 / 读失败返回 null → 调用方用 registry 兜底（单会话读失败不
+// 打断识别枚举，也不视为无标记）。
+export async function readSessionLog(ctx, id) {
+  const events = await readSessionEvents(ctx, id, 0)
+  if (events === null) return null
+  const first = events.length > 0 ? events[0] : undefined
+  return { marker: first && first.type === 'session/imported' ? first : null, events }
+}
+
+// imports registry 的 dshId 索引：dshId → { sourcePath, importedAt }。single 记录
+// 取 dshId；multi 记录取 conversations/sessions 子表全部 dshId；重导另铸的历史副本
+// 也在内（recordEntries 统一展开，见 lib/imports.mjs）；旧版纯字符串记录跳过。
+function registryDshIdMap(imports) {
+  const map = new Map()
+  for (const entry of registryEntries(imports)) {
+    map.set(entry.dshId, {
+      sourcePath: entry.sourcePath,
+      importedAt: typeof entry.importedAt === 'number' ? entry.importedAt : undefined,
+    })
+  }
+  return map
+}
+
+// 会话标题：session/title 事件 data.title（日志末尾，倒扫）。无显式标题源
+//（codex/cursor/gemini 等首问兜底）返回 undefined，DSH UI 自动回退首条 user 文本。
+export function sessionTitleFromEvents(events) {
+  if (!Array.isArray(events)) return undefined
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
+    if (ev && ev.type === 'session/title' && ev.data && typeof ev.data.title === 'string' && ev.data.title) {
+      return ev.data.title
+    }
+  }
+  return undefined
+}
+
+// 会话工件路径：sessionPersistence.locate(header)（同步、不落盘不物化）。SQLite
+// 等无单会话工件的后端返回 undefined → null；locate 抛错按无工件处理。
+export function sessionArtifactPath(sp, header) {
+  try {
+    const loc = sp && typeof sp.locate === 'function' ? sp.locate(header) : undefined
+    return loc && typeof loc.path === 'string' ? loc.path : null
+  } catch {
+    // 异常 header：locate 抛错按无工件处理，不打断识别枚举
+    return null
+  }
+}
+
+export async function listImportedSessions(ctx, registryDir) {
+  const sp = ctx.get('sessionPersistence')
+  if (!sp || typeof sp.list !== 'function' || !canReadSessionEvents(sp)) {
+    throw new Error('sessionPersistence 不可用（需要 list + 读事件面 + locate）')
+  }
+  const headers = await listPersistedHeaders(ctx)
+  const byDshId = registryDshIdMap((await loadImports(registryDir)).imports)
+  const sessions = []
+  for (const header of headers) {
+    const rec = byDshId.get(header.id)
+    const info = await readSessionLog(ctx, header.id)
+    if (rec) {
+      // registry 反查是权威信号；旧日志标记的 importedAt 仍比 registry 快照精确，
+      // 取得到就用它
+      const entry = {
+        sessionId: header.id,
+        sourcePath: rec.sourcePath,
+        artifactPath: sessionArtifactPath(sp, header),
+      }
+      if (info) {
+        const title = sessionTitleFromEvents(info.events)
+        if (title) entry.title = title
+        const marker = info.marker
+        if (marker && marker.data && typeof marker.data.importedAt === 'number') entry.importedAt = marker.data.importedAt
+        else if (typeof rec.importedAt === 'number') entry.importedAt = rec.importedAt
+      } else if (typeof rec.importedAt === 'number') {
+        entry.importedAt = rec.importedAt
+      }
+      sessions.push(entry)
+    } else if (info && info.marker) {
+      // 旧日志标记兜底：registry 记录已被撤回但标记仍在日志（二次撤回定位依赖）
+      const data = info.marker.data || {}
+      const title = sessionTitleFromEvents(info.events)
+      const entry = {
+        sessionId: header.id,
+        sourcePath: typeof data.sourcePath === 'string' && data.sourcePath ? data.sourcePath : null,
+        artifactPath: sessionArtifactPath(sp, header),
+      }
+      if (title) entry.title = title
+      if (typeof data.importedAt === 'number') entry.importedAt = data.importedAt
+      sessions.push(entry)
+    }
+  }
+  return { total: sessions.length, sessions }
+}
+
+// 定位 sessionId 对应的 registry 键（sourcePath）：imports registry 反查优先（权威，
+// 含重导另铸的历史副本）；旧日志标记 data.sourcePath
+// 兜底（registry 记录被撤回后标记仍在日志里 → 二次撤回幂等）。都不是本插件导入的会话
+// 返回 null。
+async function findSourcePathForSession(ctx, sessionId, registry) {
+  for (const entry of registryEntries(registry.imports)) {
+    if (entry.dshId === sessionId) return entry.sourcePath
+  }
+  const info = canReadSessionEvents(ctx.get('sessionPersistence')) ? await readSessionLog(ctx, sessionId) : null
+  if (info && info.marker && info.marker.data && typeof info.marker.data.sourcePath === 'string' && info.marker.data.sourcePath) {
+    return info.marker.data.sourcePath
+  }
+  return null
+}
+
+/**
+ * 撤回 / 删除时打墓碑的键：多会话源里命中的子会话（当前条目，不含历史副本）→
+ * `路径#子表:子会话`（只墓碑该子会话）；单会话源 / 未命中 → 整个源路径。
+ */
+export function retractIgnoreKey(record, sourcePath, sessionId) {
+  if (record && record.kind === 'multi') {
+    const hit = recordEntries(record).find((e) => !e.copy && e.dshId === sessionId)
+    if (hit) return sourceIgnoreKey(sourcePath, hit.subTable, hit.subKey)
+  }
+  return sourcePath
+}
+
+async function findHeader(ctx, id) {
+  try {
+    const headers = await listPersistedHeaders(ctx)
+    return headers.find((h) => h.id === id) || null
+  } catch {
+    // list 失败（后端不可用）：按找不到 header 处理，工件路径留 null
+    return null
+  }
+}
+
+export async function retractImport(ctx, args, registryDir) {
+  const sp = ctx.get('sessionPersistence')
+  const sessionId = typeof args.sessionId === 'string' && args.sessionId ? args.sessionId : null
+  const sourcePath = typeof args.sourcePath === 'string' && args.sourcePath ? args.sourcePath : null
+  if (!sessionId && !sourcePath) throw new Error('retract_import 需要 sessionId 或 sourcePath（二选一）')
+  const registry = await loadImports(registryDir)
+  const key = sourcePath || await findSourcePathForSession(ctx, sessionId, registry)
+  if (!key) {
+    throw new Error('会话无导入标记且不在 imports registry: ' + sessionId + '（不是本插件导入的会话）')
+  }
+  const wasRegistered = Object.prototype.hasOwnProperty.call(registry.imports, key)
+  const record = unwrapRecord(registry.imports[key])
+  // 记录关联的全部 DSH 会话 id（当前 + 重导另铸的历史副本 + multi 子表全部）
+  const ids = recordSessionIds(record)
+  await removeImport(registryDir, key)
+  // 撤回是用户显式动作：打永久墓碑（'retracted'），重扫/源增长都不会把它带回来。
+  // 仅带 sessionId 撤回 multi 源时只墓碑该子会话；整源撤回墓碑整个源路径。
+  if (sessionId) {
+    await rememberIgnore(registryDir, { key: retractIgnoreKey(record, key, sessionId), reason: 'retracted', dshId: sessionId })
+  } else {
+    await rememberIgnore(registryDir, { key, reason: 'retracted' })
+  }
+
+  // 工件路径：仅 sessionId 时用该会话 header；仅 sourcePath 且记录只关联一个会话
+  // 时用它（multi 多会话 → 逐个用 sessionId 撤回才能拿到各自工件路径）
+  let artifactPath = null
+  if (sessionId) {
+    const header = await findHeader(ctx, sessionId)
+    artifactPath = header ? sessionArtifactPath(sp, header) : null
+  } else if (ids.length === 1) {
+    const header = await findHeader(ctx, ids[0])
+    artifactPath = header ? sessionArtifactPath(sp, header) : null
+  }
+  const manualDelete = artifactPath
+    ? '请手动删除工件目录 ' + artifactPath + '（本插件不删会话，DSH 无 delete 面）。'
+      + 'DSH 宿主内存索引仍保留该会话 id（幽灵会话），彻底从会话列表消失需重启 dsh；'
+      + '期间同源重导会自动另铸后缀新 id 并报告 staleGhost。'
+    : ids.length > 1
+      ? '该源文件导入了 ' + ids.length + ' 个会话，请用 list_imported_sessions 按 sessionId 逐个撤回以获取各工件路径（本插件不删会话，DSH 无 delete 面）'
+      : '会话工件不存在（可能已手动删除）；registry 记录已移除（本插件不删会话，DSH 无 delete 面）。'
+        + '若宿主内存仍残留该会话 id（幽灵会话），彻底消失需重启 dsh，期间同源重导会自动另铸后缀新 id'
+  return { removed: true, sourcePath: key, artifactPath, manualDelete, wasRegistered }
+}

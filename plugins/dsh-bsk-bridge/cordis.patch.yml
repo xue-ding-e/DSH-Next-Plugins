@@ -1,0 +1,21 @@
+# dsh-bsk-bridge bundle patch.
+#
+# Inserts the Host half. The row is enabled, but the plugin's own `enabled`
+# flag is what decides whether any tools reach the model surface, so turning it
+# off is a config override rather than a Loader disable:
+#
+#   - id: bsk-bridge
+#     name: dsh-bsk-bridge
+#     config:
+#       enabled: false
+#
+# A patch override replaces the whole `config` object, so restate every field you
+# still want (binary, browser, timeoutMs, maxChars).
+- insert:
+    - id: bsk-bridge
+      name: dsh-bsk-bridge
+      config:
+        enabled: true
+        # Select a browser on this computer before starting a session.
+        # The tool also accepts an explicit browser id for each start.
+        browser: ''

@@ -1,0 +1,10 @@
+# dsh-retry-tuning bundle patch: inserts the retry-timing row.
+#
+# The row id is also the settings namespace the page writes through, and the
+# Host half reads its own volatile Config on every failed request, so an edit
+# reaches the next wait without reloading the plugin.
+- insert:
+    - id: retry-tuning
+      name: dsh-retry-tuning
+      config:
+        enabled: true

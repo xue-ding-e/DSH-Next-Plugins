@@ -1,0 +1,12 @@
+# Build inputs that never belong in version control.
+node_modules/
+lib-test/
+*.tgz
+overlay.yml
+.DS_Store
+
+# `lib/` is intentionally tracked here, unlike an upstream npm package: DSH loads
+# `lib/index.js` and nothing else, and this vendored copy is mounted through
+# `link:` with no build step. Committing the bundle is what makes the checked-in
+# tree runnable and what keeps `git diff` honest about the shipped code.
+# Rebuild it with `pnpm run prepare` after touching `src/`.

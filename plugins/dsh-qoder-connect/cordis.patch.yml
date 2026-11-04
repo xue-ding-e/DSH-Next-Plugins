@@ -1,0 +1,34 @@
+# 注册 Qoder CN provider（渠道名 qoder1），不改动 profile 当前的默认模型。
+# 凭据是宿主侧的官方 PAT 明文：$DSH_HOME/qoder/pat（Windows 上是 %USERPROFILE%\.dsh\qoder\pat），
+# 或环境变量 QODERCN_PAT / QODERCN_PERSONAL_ACCESS_TOKEN / QODERCN_API_KEY。
+# 插件自己用它换 jobToken（jt-），不碰 Qoder 桌面 App 的 auth.v1.dat。
+#
+# 可选配置（写在 profile 的 cordis.patch.yml 里，按 patch id `llm-qoder` 覆盖）：
+#
+#   - id: llm-qoder
+#     name: dsh-qoder-connect
+#     config:
+#       # 按模型覆盖上下文窗口。DSH 设置页那个「上下文窗口」滑块对程序化注册的
+#       # provider 无效（改的是配置化 provider 的目录项），要放大窗口只能走这里。
+#       # 生效顺序：覆盖值 > 官方 max_input_tokens > 200000。
+#       # ⚠️ 超过官方上限时，一旦真的发出超长请求，上游可能直接报错。
+#       contextWindowOverrides:
+#         dfmodel: 1000000
+#       # 重试整次模型请求；参数解析失败时最多重试两次，不执行失败响应里的工具。
+#       # retryableCodes 覆盖完整默认列表，不能只填 MALFORMED_RESPONSE。
+#       retryPolicy:
+#         mode: normal
+#         maxRetries: 2
+#         retryableCodes: [EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT, MALFORMED_RESPONSE]
+#         backoff:
+#           initialDelayMs: 500
+#           maxDelayMs: 4000
+#           jitterRatio: 0.2
+#
+#   - id: llm-qoder
+#     name: dsh-qoder-connect
+#     config:
+#       cosyVersion: "1.1.75-hotfix.1"   # 覆盖客户端版本（服务端按它裁剪模型目录）
+- insert:
+    - id: llm-qoder
+      name: dsh-qoder-connect

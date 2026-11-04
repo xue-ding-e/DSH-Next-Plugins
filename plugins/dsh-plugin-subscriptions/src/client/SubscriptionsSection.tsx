@@ -1,0 +1,1209 @@
+/**
+ * Subscriptions settings section: one card per subscription provider with an
+ * OAuth login/logout flow driven by the node half's `/subscriptions-auth` RPC
+ * channel. Login state lives server-side; the page polls `status` only while
+ * a login attempt is busy, so an idle page never polls. All state is local
+ * React state — the page has no store.
+ *
+ * Every color resolves through a `--dsw-alias-*` design token (the ui-theme
+ * design-platform.css values flip under `body[data-ds-dark-theme]`), and
+ * every user-visible string goes through the locale-bound `t` of the
+ * 'settings.subscriptions' namespace. Buttons and inputs take the
+ * native settings vocabulary with shared, scoped control states.
+ */
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+import { en } from './locales.js'
+import { resetActionBlock } from './reset-action.js'
+import { visibleUsageWindows } from './usage-window-filter.js'
+import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { providerSettingsCss } from './provider-settings-styles.js'
+import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
+import type { SubscriptionsKey } from './locales.js'
+
+import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
+export { callSubscriptionsAuth } from './subscriptions-rpc.js'
+
+/** Poll cadence while a provider login attempt is busy. */
+const POLL_INTERVAL_MS = 2000
+
+/**
+ * Model count above which the expanded default-effort list also offers a name
+ * filter; below it the list is short enough to scan.
+ */
+const MODEL_FILTER_THRESHOLD = 8
+
+/** Subscription provider ids, fixed by the node half's OAuth adapters. */
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+
+/** One logged-in account as answered by the `status` endpoint. */
+export interface AccountStatus {
+  key: string
+  account?: string
+  expiresAt?: number
+  plan?: string
+  isDefault: boolean
+}
+
+/** One provider's login state as answered by the `status` endpoint. */
+export interface ProviderStatus {
+  /** Picker selection; absent follows discovery, [] hides all model quotas. */
+  visibleModels?: string[]
+  displayName?: string
+  busy: boolean
+  accounts: AccountStatus[]
+  detail?: string
+  /** The CLI version the route presents (Codex, Claude), and where it came from. */
+  clientVersion?: { version: string; source: ClientVersionSource }
+}
+
+export type ClientVersionSource = 'npm' | 'local' | 'fallback' | 'config'
+
+const CLIENT_VERSION_SOURCES: Record<ClientVersionSource, SubscriptionsKey> = {
+  npm: 'clientVersionNpm',
+  local: 'clientVersionLocal',
+  fallback: 'clientVersionFallback',
+  config: 'clientVersionConfig',
+}
+
+/** `status` endpoint value: the node half owns this shape. */
+interface StatusResponse {
+  providers: Record<SubscriptionProvider, ProviderStatus>
+}
+
+/** One rate-limit window as answered by the `usage` endpoint. */
+export interface UsageWindow {
+  kind: 'session' | 'weekly' | 'other'
+  scope?: string
+  usedPercent: number
+  resetsAt?: number
+}
+
+/** `usage` endpoint value: the node half owns this shape. */
+export interface ProviderUsage {
+  supported: boolean
+  windows?: UsageWindow[]
+  plan?: string
+  resetCredits?: { id?: string; grantedAt?: number; expiresAt?: number }[]
+  resetCreditsError?: string
+}
+
+/** One model's default-effort picker state as answered by `modelDefaults`. */
+export interface ModelDefaultView {
+  id: string
+  name: string
+  /** Advertised effort levels, in catalog order (empty when the model has no reasoning). */
+  efforts: { id: string; name: string }[]
+  /** The user-configured default effort, when set. */
+  configured?: string
+}
+
+/** `modelDefaults` endpoint value: one provider's picker state. */
+export interface ModelDefaultsCatalog {
+  provider: SubscriptionProvider
+  models: ModelDefaultView[]
+}
+
+/** `proxyGet` endpoint value: the node half owns this shape (no secrets). */
+export interface ProxyConfigView {
+  enabled: boolean
+  url: string
+  username?: string
+  passwordSet: boolean
+  bypass: string[]
+  error?: string
+}
+
+/** `proxyTest` endpoint value. */
+export interface ProxyTestResult {
+  ok: boolean
+  viaProxy: boolean
+  status?: number
+  latencyMs?: number
+  error?: string
+}
+
+/** `login` endpoint value: the URL the user completes OAuth at. */
+interface LoginResponse {
+  authorizeUrl: string
+  /** Device-flow providers (copilot): the code the user types at authorizeUrl. */
+  userCode?: string
+}
+
+/** Injected dependencies of {@link SubscriptionsSection} (slot `inject`). */
+export interface SubscriptionsSectionInjected {
+  /** Generic logical-RPC caller over the Connection transport. */
+  rpc: ConnectionHandle['rpc']
+  /** Section copy: translate a 'settings.subscriptions' key with `{name}` template params. */
+  t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
+}
+
+/**
+ * Props delivered by the slot outlet: the inject face spread flat (the
+ * renderer erases the share boundary at the render call).
+ */
+export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>
+
+/** Card display metadata, in page order (names are brand names, not translated). */
+const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
+  { id: 'codex', name: 'Codex (ChatGPT)' },
+  { id: 'claude', name: 'Claude' },
+  { id: 'grok', name: 'Grok (X Premium)' },
+  { id: 'copilot', name: 'GitHub Copilot' },
+  { id: 'antigravity', name: 'Google Antigravity' },
+]
+
+/** Human text of an action failure, SubscriptionsAuthError or not. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Copy a keyed map without the entries whose key is not in `live`. */
+function dropStale<T>(map: Record<string, T>, live: ReadonlySet<string>): Record<string, T> {
+  const stale = Object.keys(map).filter(key => !live.has(key))
+  if (stale.length === 0) return map
+  const next = { ...map }
+  for (const key of stale) delete next[key]
+  return next
+}
+
+/**
+ * English-dictionary fallback for a missing inject `t` (standalone renders);
+ * the slot inject always supplies the locale-bound one.
+ * @param key - dictionary key.
+ * @param params - `{name}` template params.
+ * @returns the template with params substituted.
+ */
+function fallbackTranslate(key: SubscriptionsKey, params?: Record<string, unknown>): string {
+  let text: string = en[key]
+  for (const [name, value] of Object.entries(params ?? {})) {
+    text = text.replaceAll(`{${name}}`, String(value))
+  }
+  return text
+}
+
+const styles: Record<string, CSSProperties> = {
+  section: {
+    display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560,
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  intro: { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 14, lineHeight: '22px' },
+  card: {
+    border: '0.5px solid var(--dsw-alias-settings-card-stroke, var(--dsw-alias-border-l4))',
+    borderRadius: 'var(--dsw-radius-xl, 20px)', background: 'var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2))',
+    padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+  },
+  proxyCard: {
+    padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6,
+  },
+  separator: { borderTop: '0.5px solid var(--dsw-alias-border-l2)' },
+  cardHeader: { display: 'flex', alignItems: 'center', gap: 8 },
+  dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
+  name: { fontWeight: 500, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-primary)' },
+  statusLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+  clientVersion: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' },
+  errorLine: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' },
+  actions: { display: 'flex', gap: 8, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' },
+  usage: {
+    display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4,
+    borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: 8,
+  },
+  usageHeader: { display: 'flex', alignItems: 'center', gap: 8 },
+  usageTitle: { fontSize: 12, lineHeight: '18px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' },
+  usagePlan: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+  usageRefresh: { minHeight: 22, height: 22, padding: '0 8px', marginLeft: 'auto' },
+  usageRow: { display: 'flex', flexDirection: 'column', gap: 3 },
+  usageMeta: {
+    display: 'flex', justifyContent: 'space-between', gap: 8,
+    fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
+  },
+  accountRow: {
+    display: 'flex', flexDirection: 'column', gap: 6,
+    border: '0.5px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-lg, 16px)',
+    padding: '8px 10px', marginTop: 4,
+  },
+  accountHeader: { display: 'flex', alignItems: 'center', gap: 8 },
+  accountName: { fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)', userSelect: 'all' },
+  starButton: {
+    border: 'none', padding: 0, width: 28,
+    font: 'inherit', fontSize: 14, lineHeight: '20px', cursor: 'pointer',
+    color: 'var(--dsw-alias-state-warn-label)',
+  },
+  usageTrack: {
+    height: 6, borderRadius: 3, overflow: 'hidden',
+    background: 'var(--dsw-alias-bg-layer-1)', border: '0.5px solid var(--dsw-alias-border-l2)',
+  },
+  usageFill: { height: '100%', borderRadius: 3 },
+  deviceCode: {
+    marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6,
+    border: '0.5px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-lg, 16px)',
+    padding: '10px 12px', background: 'var(--dsw-alias-bg-layer-1)',
+  },
+  deviceCodeText: {
+    fontFamily: 'monospace', fontSize: 18, lineHeight: '24px', letterSpacing: 2,
+    color: 'var(--dsw-alias-label-primary)', userSelect: 'all',
+  },
+  proxyField: { display: 'flex', flexDirection: 'column', gap: 4 },
+  proxyLabel: { fontSize: 13, fontWeight: 500, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)' },
+  proxyInput: { width: '100%' },
+  manual: { fontSize: 13, lineHeight: '20px' },
+  manualRow: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 8 },
+  manualInput: { flex: '1 1 200px', minWidth: 0 },
+  proxyHint: {
+    margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
+  },
+  proxyCheck: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
+  },
+  proxyMessage: { margin: 0, fontSize: 12, lineHeight: '18px' },
+  proxyActions: { display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 2 },
+  modalOverlay: {
+    position: 'fixed', inset: 0, zIndex: 1000,
+    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    background: 'var(--dsw-alias-bg-mask-1, #0006)', backdropFilter: 'var(--dsw-mask-blur, none)',
+  },
+  modal: {
+    width: 460, maxWidth: '100%', maxHeight: '90vh', overflowY: 'auto',
+    boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 12,
+    padding: '16px 18px', borderRadius: 'var(--dsw-radius-panel, 28px)',
+    background: 'var(--dsw-alias-bg-layer-2)', border: 0, boxShadow: 'var(--dsw-elevation-prominent)',
+  },
+  modalHeader: { display: 'flex', alignItems: 'center', gap: 8 },
+  modalTitle: { fontWeight: 500, fontSize: 16, lineHeight: '24px', color: 'var(--dsw-alias-label-primary)' },
+}
+
+/** Status dot color for one provider state. */
+function dotColor(status: ProviderStatus | undefined): string {
+  if (status?.busy === true) return 'var(--dsw-alias-state-warn-label)'
+  if ((status?.accounts.length ?? 0) > 0) return 'var(--dsw-alias-state-success-primary)'
+  return 'var(--dsw-alias-label-dimmed)'
+}
+
+/**
+ * Whether a provider has at least one connected account. Multi-account made
+ * "logged in" a property of the account list rather than a flag, so every
+ * logged-in test goes through this one predicate.
+ * @param status - the provider's last reported state, possibly absent.
+ * @returns true when the provider serves at least one account.
+ */
+function hasAccount(status: ProviderStatus | undefined): boolean {
+  return (status?.accounts.length ?? 0) > 0
+}
+
+/** The CLI version a route presents, beside the provider name; nothing for routes without one. */
+export function ClientVersionTag({ clientVersion, t }: {
+  clientVersion: ProviderStatus['clientVersion']
+  t: SubscriptionsSectionInjected['t']
+}) {
+  if (clientVersion === undefined) return null
+  return (
+    <span style={styles.clientVersion} title={t('clientVersionHint')}>
+      {t('clientVersion', { version: clientVersion.version, source: t(CLIENT_VERSION_SOURCES[clientVersion.source]) })}
+    </span>
+  )
+}
+
+/**
+ * One-line status text for one provider state.
+ * @param t - section translate.
+ * @param status - the provider's last reported state.
+ * @returns the localized status line.
+ */
+function statusText(t: SubscriptionsSectionInjected['t'], status: ProviderStatus | undefined): string {
+  if (status === undefined) return t('checking')
+  if (status.busy) return t('loginInProgress')
+  if (status.accounts.length > 0) return t('loggedInCount', { count: status.accounts.length })
+  return t('notLoggedIn')
+}
+
+/**
+ * Localized label of one usage window (kind, plus the model scope when named).
+ * @param t - section translate.
+ * @param window - the reported window.
+ * @returns e.g. "5-hour window" or "Weekly · Opus".
+ */
+function usageWindowLabel(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string {
+  const base = window.kind === 'session'
+    ? t('usageSession')
+    : window.kind === 'weekly' ? t('usageWeekly') : t('usageWindow')
+  return window.scope !== undefined && window.scope !== '' ? `${base} · ${window.scope}` : base
+}
+
+/** Bar fill color: success normally, warn from 80%, error from 95%. Shared with the composer badge. */
+export function usageBarColor(usedPercent: number): string {
+  if (usedPercent >= 95) return 'var(--dsw-alias-state-error-primary)'
+  if (usedPercent >= 80) return 'var(--dsw-alias-state-warn-label)'
+  return 'var(--dsw-alias-state-success-primary)'
+}
+
+/** One-line status text of the proxy config card. */
+function proxyStatusText(
+  t: SubscriptionsSectionInjected['t'],
+  proxy: ProxyConfigView | undefined,
+  loadError: string | undefined,
+): string {
+  if (loadError !== undefined) return t('proxyLoadFailed', { message: loadError })
+  if (proxy === undefined) return t('proxyLoading')
+  if (proxy.error !== undefined) return t('proxyStatusError', { message: proxy.error })
+  if (proxy.enabled) return t('proxyStatusEnabled', { url: proxy.url })
+  return t('proxyStatusNone')
+}
+
+/** Feedback-line color of the proxy dialog. */
+function messageColor(tone: 'success' | 'error'): string {
+  return tone === 'error'
+    ? 'var(--dsw-alias-state-error-primary)'
+    : 'var(--dsw-alias-state-success-primary)'
+}
+
+/** What one provider's collapsible default-effort section renders. */
+export interface ModelDefaultsView {
+  /** Models with reasoning levels, after the name filter — one row each. */
+  shown: ModelDefaultView[]
+  /** Models with reasoning levels before filtering (the header total). */
+  total: number
+  /** How many of those carry a user override (the header count). */
+  overridden: number
+  /** Models without reasoning levels: one count line, never a row each. */
+  withoutEfforts: number
+  /** Whether the list is long enough to deserve a filter box. */
+  showFilter: boolean
+}
+
+/**
+ * Derive one provider's default-effort section from its catalog and filter.
+ * Pure so the collapsed-header counts and the filter stay testable without a
+ * DOM: rows come only from models that advertise levels, the count of the rest
+ * rides as one line, and the filter matches display name or model id.
+ * @param models - the provider's catalog models, or undefined while loading.
+ * @param filter - the raw filter input (trimmed and lowercased here).
+ * @returns the section's rows and header counts.
+ */
+export function deriveModelDefaultsView(
+  models: readonly ModelDefaultView[] | undefined,
+  filter: string,
+): ModelDefaultsView {
+  const all = models ?? []
+  const withEfforts = all.filter(model => model.efforts.length > 0)
+  const query = filter.trim().toLowerCase()
+  const shown = query === ''
+    ? withEfforts
+    : withEfforts.filter(model => model.name.toLowerCase().includes(query)
+      || model.id.toLowerCase().includes(query))
+  return {
+    shown,
+    total: withEfforts.length,
+    overridden: withEfforts.filter(model => model.configured !== undefined).length,
+    withoutEfforts: all.length - withEfforts.length,
+    showFilter: withEfforts.length > MODEL_FILTER_THRESHOLD,
+  }
+}
+
+/** Inputs of the default-effort fetch decision (see {@link shouldFetchModelDefaults}). */
+export interface ModelDefaultsFetchInput {
+  /** Providers that currently have at least one account. */
+  loggedIn: readonly SubscriptionProvider[]
+  /** Providers whose disclosure is open. */
+  open: readonly SubscriptionProvider[]
+  /** The account signature the last completed fetch was answered for. */
+  loadedFor: string | undefined
+  /** The account signature of the current status snapshot. */
+  signature: string
+  /** Whether the last attempt failed (a failure latches until Retry). */
+  failed: boolean
+}
+
+/**
+ * Whether the default-effort catalog needs (re)fetching.
+ *
+ * Fetching is gated on an *attempt* signature rather than on the payload
+ * being empty: an empty answer is a legitimate result (a narrowed
+ * `config.providers`, or a catalog that is momentarily unavailable), and
+ * treating it as "not loaded yet" re-ran this effect forever. The signature
+ * also covers the accounts, so logging a second provider in refetches
+ * instead of leaving that card on the previous answer.
+ * @param input - the decision inputs.
+ * @returns true when the caller should start a fetch.
+ */
+export function shouldFetchModelDefaults(input: ModelDefaultsFetchInput): boolean {
+  if (input.failed) return false
+  if (input.loggedIn.length === 0) return false
+  // Only an open disclosure pays for the per-model live resolve.
+  if (!input.open.some(provider => input.loggedIn.includes(provider))) return false
+  return input.loadedFor !== input.signature
+}
+
+/**
+ * Stable signature of the accounts a catalog answer depends on. A change
+ * means a previous answer is stale (an account arrived or left), so the next
+ * open disclosure refetches.
+ * @param statuses - the per-provider status snapshot.
+ * @returns a signature string, stable across renders with equal accounts.
+ */
+export function modelDefaultsSignature(
+  statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>,
+): string {
+  return PROVIDERS
+    .map(({ id }) => `${id}:${(statuses[id]?.accounts ?? []).map(account => account.key).sort().join(',')}`)
+    .join('|')
+}
+
+/**
+ * The Subscriptions settings page component.
+ * @param props - the slot inject face ({@link SubscriptionsSectionInjected}).
+ * @returns the section body, or a notice while the RPC face is absent.
+ */
+export function SubscriptionsSection(props: SubscriptionsSectionProps) {
+  const { rpc } = props
+  const t = props.t ?? fallbackTranslate
+  const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
+  const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
+  const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
+    codex: '', claude: '', grok: '', copilot: '', antigravity: '',
+  })
+  /** Pending device-flow codes (copilot), shown while the attempt polls. */
+  const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
+  const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
+  /** Usage snapshots keyed `${provider}:${accountKey}` — every account tracks its own windows. */
+  const [usages, setUsages] = useState<Record<string, ProviderUsage>>({})
+  const [usageErrors, setUsageErrors] = useState<Record<string, string>>({})
+  const [usageLoading, setUsageLoading] = useState<Record<string, boolean>>({})
+  const [resetConfirmation, setResetConfirmation] = useState<{ account: string; ticket: string; expiresAt: number; creditExpiresAt?: number; weeklyUsedPercent: number }>()
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetAcknowledged, setResetAcknowledged] = useState(false)
+  const [resetMessage, setResetMessage] = useState('')
+  const [resetAccount, setResetAccount] = useState<string>()
+  const resetDialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (resetConfirmation) resetDialogRef.current?.showModal()
+    else resetDialogRef.current?.close()
+  }, [resetConfirmation])
+  const resetInflight = useRef(false)
+  const mountedRef = useRef(true)
+  const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
+  /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
+  const usageInflightRef = useRef(new Set<string>())
+  /** Proxy config as last answered by `proxyGet`/`proxySet`. */
+  const [proxy, setProxy] = useState<ProxyConfigView | undefined>(undefined)
+  const [proxyLoadError, setProxyLoadError] = useState<string | undefined>(undefined)
+  /** Proxy dialog state (draft fields; the password never pre-fills). */
+  const [proxyOpen, setProxyOpen] = useState(false)
+  const [managedProvider, setManagedProvider] = useState<{ id: SubscriptionProvider; name: string }>()
+  const [proxyEnabled, setProxyEnabled] = useState(false)
+  const [proxyUrl, setProxyUrl] = useState('')
+  const [proxyUsername, setProxyUsername] = useState('')
+  const [proxyPassword, setProxyPassword] = useState('')
+  const [proxyClearPassword, setProxyClearPassword] = useState(false)
+  const [proxyBypass, setProxyBypass] = useState('')
+  const [proxySaving, setProxySaving] = useState(false)
+  const [proxyTesting, setProxyTesting] = useState(false)
+  const [proxyMessage, setProxyMessage] = useState<{ tone: 'success' | 'error'; text: string } | undefined>(undefined)
+  const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | undefined>(undefined)
+  const setProviderError = useCallback((provider: SubscriptionProvider, message: string | undefined): void => {
+    if (!mountedRef.current) return
+    setErrors((prev) => {
+      const next = { ...prev }
+      if (message === undefined) delete next[provider]
+      else next[provider] = message
+      return next
+    })
+  }, [])
+
+  const stopPolling = useCallback((provider: SubscriptionProvider): void => {
+    const poller = pollersRef.current.get(provider)
+    if (poller !== undefined) {
+      clearInterval(poller)
+      pollersRef.current.delete(provider)
+    }
+  }, [])
+
+  /** Refetch every provider's status; stop a provider's poller once its attempt settles. */
+  const refresh = useCallback(async (): Promise<void> => {
+    if (rpc === undefined) return
+    let response: StatusResponse
+    try {
+      response = await callSubscriptionsAuth<StatusResponse>(rpc, 'status', {})
+    } catch (error) {
+      // A failed poll must not kill the page; busy providers keep polling and
+      // the action paths report their own errors. But staying silent turns a
+      // persistent failure into an endless "Checking…" — show it instead.
+      const message = error instanceof Error ? error.message : String(error)
+      for (const { id } of PROVIDERS) setProviderError(id, message)
+      return
+    }
+    if (!mountedRef.current) return
+    setStatuses(response.providers)
+    // The poll recovered: drop any error line a previous failed poll left.
+    for (const { id } of PROVIDERS) setProviderError(id, undefined)
+    for (const { id } of PROVIDERS) {
+      const status = response.providers[id]
+      if (status.accounts.length > 0 || !status.busy) {
+        stopPolling(id)
+        // The attempt settled (success, timeout, or cancel): drop the code card.
+        setDeviceCodes((prev) => {
+          if (prev[id] === undefined) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+      }
+    }
+  }, [rpc, stopPolling, setProviderError])
+
+  const startPolling = useCallback((provider: SubscriptionProvider): void => {
+    if (pollersRef.current.has(provider)) return
+    pollersRef.current.set(provider, setInterval(() => { void refresh() }, POLL_INTERVAL_MS))
+  }, [refresh])
+
+  // Initial load; every busy provider (e.g. an attempt started before a page
+  // reload) resumes polling. Teardown clears pollers and the mounted guard.
+  useEffect(() => {
+    mountedRef.current = true
+    void refresh().then(() => {
+      if (!mountedRef.current) return
+      setStatuses((current) => {
+        for (const { id } of PROVIDERS) {
+          if (current[id]?.busy === true) startPolling(id)
+        }
+        return current
+      })
+    })
+    return () => {
+      mountedRef.current = false
+      for (const poller of pollersRef.current.values()) clearInterval(poller)
+      pollersRef.current.clear()
+    }
+  }, [refresh, startPolling])
+
+  const loadUsage = useCallback(async (provider: SubscriptionProvider, account: string, force = false): Promise<void> => {
+    const key = `${provider}:${account}`
+    if (rpc === undefined || usageInflightRef.current.has(key)) return
+    usageInflightRef.current.add(key)
+    setUsageLoading(prev => ({ ...prev, [key]: true }))
+    try {
+      const usage = await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account, ...force ? { force: true } : {} })
+      if (!mountedRef.current) return
+      setUsages(prev => ({ ...prev, [key]: usage }))
+      setUsageErrors((prev) => {
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
+    } catch (error) {
+      if (mountedRef.current) setUsageErrors(prev => ({ ...prev, [key]: messageOf(error) }))
+    } finally {
+      usageInflightRef.current.delete(key)
+      if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
+    }
+  }, [rpc])
+
+  async function prepareReset(account: string): Promise<void> {
+    if (!rpc || resetInflight.current) return
+    resetInflight.current = true
+    setResetBusy(true)
+    setResetAccount(account)
+    setResetConfirmation(undefined)
+    setResetMessage('')
+    try {
+      const result = await callSubscriptionsAuth<Omit<NonNullable<typeof resetConfirmation>, 'account'>>(rpc, 'prepareReset', { account })
+      setResetAcknowledged(false)
+      setResetConfirmation({ ...result, account })
+    } catch (error) { setResetMessage(messageOf(error)) }
+    finally { resetInflight.current = false; setResetBusy(false) }
+  }
+
+  async function consumeReset(): Promise<void> {
+    if (!rpc || !resetConfirmation || !resetAcknowledged || resetInflight.current) return
+    const { account, ticket } = resetConfirmation
+    resetInflight.current = true
+    setResetBusy(true)
+    setResetConfirmation(undefined)
+    try {
+      await callSubscriptionsAuth(rpc, 'consumeReset', { account, ticket })
+      setResetMessage(t('resetUseSuccess'))
+    } catch (error) { setResetMessage(messageOf(error)) }
+    finally {
+      await loadUsage('codex', account, true)
+      resetInflight.current = false; setResetBusy(false)
+    }
+  }
+
+  // Fetch usage once an account is logged in; drop the snapshots of accounts
+  // that vanished so a re-login refetches. A failed lookup does not auto-retry
+  // — the per-account Refresh button is the retry path.
+  useEffect(() => {
+    const live = new Set<string>()
+    for (const { id } of PROVIDERS) {
+      for (const account of statuses[id]?.accounts ?? []) {
+        const key = `${id}:${account.key}`
+        live.add(key)
+        if (usages[key] === undefined && usageErrors[key] === undefined) void loadUsage(id, account.key)
+      }
+    }
+    setUsages(prev => dropStale(prev, live))
+    setUsageErrors(prev => dropStale(prev, live))
+  }, [statuses, usages, usageErrors, loadUsage])
+
+  const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
+    if (rpc === undefined) return
+    setProviderError(provider, undefined)
+    try {
+      const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
+        provider,
+        ...method === undefined ? {} : { method },
+      })
+      if (typeof response.authorizeUrl === 'string' && response.authorizeUrl === '') {
+        // Instant login (e.g. imported from Claude Code credentials)
+        await refresh()
+        return
+      }
+      if (typeof response.authorizeUrl !== 'string') {
+        throw new SubscriptionsAuthError(t('loginMissingUrl'))
+      }
+      if (!mountedRef.current) return
+      // Optimistic busy so Cancel and the manual fallback appear before the first poll tick.
+      setStatuses(prev => ({
+        ...prev,
+        [provider]: { accounts: prev[provider]?.accounts ?? [], ...prev[provider], busy: true },
+      }))
+      if (typeof response.userCode === 'string' && response.userCode.length > 0) {
+        // Device flow: show the code card instead of opening the page blind —
+        // the user copies the code first, then opens the verification page.
+        setDeviceCodes(prev => ({ ...prev, [provider]: { userCode: response.userCode as string, verificationUrl: response.authorizeUrl } }))
+      } else {
+        window.open(response.authorizeUrl, '_blank', 'noopener')
+      }
+      startPolling(provider)
+    } catch (error) {
+      setProviderError(provider, messageOf(error))
+    }
+  }, [rpc, t, setProviderError, startPolling])
+
+  const cancel = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
+    if (rpc === undefined) return
+    stopPolling(provider)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'cancel', { provider })
+    } catch (error) {
+      setProviderError(provider, messageOf(error))
+    }
+    await refresh()
+  }, [rpc, stopPolling, setProviderError, refresh])
+
+  const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
+    if (rpc === undefined) return
+    const input = manualDrafts[provider].trim()
+    if (input === '') return
+    setProviderError(provider, undefined)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'manual', { provider, input })
+      if (mountedRef.current) setManualDrafts(prev => ({ ...prev, [provider]: '' }))
+    } catch (error) {
+      setProviderError(provider, messageOf(error))
+    }
+    await refresh()
+  }, [rpc, manualDrafts, setProviderError, refresh])
+
+  const logout = useCallback(async (provider: SubscriptionProvider, account: string, display: string, name: string): Promise<void> => {
+    if (rpc === undefined) return
+    if (!window.confirm(t('logoutAccountConfirm', { provider: name, account: display }))) return
+    setProviderError(provider, undefined)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'logout', { provider, account })
+    } catch (error) {
+      setProviderError(provider, messageOf(error))
+    }
+    await refresh()
+  }, [rpc, t, setProviderError, refresh])
+
+  const setDefault = useCallback(async (provider: SubscriptionProvider, account: string): Promise<void> => {
+    if (rpc === undefined) return
+    setProviderError(provider, undefined)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'setDefault', { provider, account })
+    } catch (error) {
+      setProviderError(provider, messageOf(error))
+    }
+    await refresh()
+  }, [rpc, setProviderError, refresh])
+
+  const copyDeviceCode = useCallback((provider: SubscriptionProvider, userCode: string): void => {
+    void navigator.clipboard?.writeText(userCode).then(() => {
+      if (!mountedRef.current) return
+      setCopiedCode(provider)
+      setTimeout(() => {
+        if (mountedRef.current) {
+          setCopiedCode(current => current === provider ? undefined : current)
+        }
+      }, 1500)
+    }).catch(() => undefined)
+  }, [])
+
+  // Proxy configuration: load once on mount; the dialog drives proxySet/proxyTest.
+  useEffect(() => {
+    if (rpc === undefined) return
+    let alive = true
+    void callSubscriptionsAuth<ProxyConfigView>(rpc, 'proxyGet', {}).then((view) => {
+      if (!alive) return
+      setProxy(view)
+      setProxyLoadError(undefined)
+    }).catch((error) => {
+      if (alive) setProxyLoadError(messageOf(error))
+    })
+    return () => { alive = false }
+  }, [rpc])
+
+  useEffect(() => {
+    if (!proxyOpen) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setProxyOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [proxyOpen])
+
+  const openProxyDialog = useCallback((): void => {
+    if (proxy === undefined) return
+    setProxyEnabled(proxy.enabled)
+    setProxyUrl(proxy.url)
+    setProxyUsername(proxy.username ?? '')
+    setProxyPassword('')
+    setProxyClearPassword(false)
+    setProxyBypass(proxy.bypass.join(', '))
+    setProxyMessage(undefined)
+    setProxyTestResult(undefined)
+    setProxyOpen(true)
+  }, [proxy])
+
+  const saveProxy = useCallback(async (): Promise<void> => {
+    if (rpc === undefined) return
+    setProxySaving(true)
+    setProxyMessage(undefined)
+    try {
+      const view = await callSubscriptionsAuth<ProxyConfigView>(rpc, 'proxySet', {
+        enabled: proxyEnabled,
+        url: proxyUrl.trim(),
+        username: proxyUsername,
+        ...proxyClearPassword ? { password: null } : proxyPassword !== '' ? { password: proxyPassword } : {},
+        bypass: proxyBypass.split(/[,\n]/).map(entry => entry.trim()).filter(entry => entry !== ''),
+      })
+      setProxy(view)
+      setProxyLoadError(undefined)
+      setProxyMessage({ tone: 'success', text: t('proxySaved') })
+      setProxyOpen(false)
+    } catch (error) {
+      setProxyMessage({ tone: 'error', text: t('proxySaveFailed', { message: messageOf(error) }) })
+    } finally {
+      setProxySaving(false)
+    }
+  }, [rpc, proxyEnabled, proxyUrl, proxyUsername, proxyPassword, proxyClearPassword, proxyBypass, t])
+
+  const testProxy = useCallback(async (): Promise<void> => {
+    if (rpc === undefined || proxyTesting) return
+    setProxyTesting(true)
+    setProxyTestResult(undefined)
+    try {
+      // Test the dialog's current inputs (they do not need to be saved first);
+      // the host builds a throwaway agent for the probe.
+      setProxyTestResult(await callSubscriptionsAuth<ProxyTestResult>(rpc, 'proxyTest', {
+        proxy: {
+          url: proxyUrl.trim(),
+          ...proxyUsername.trim() !== '' ? { username: proxyUsername.trim() } : {},
+          ...proxyPassword !== '' ? { password: proxyPassword } : {},
+        },
+      }))
+    } catch (error) {
+      setProxyTestResult({ ok: false, viaProxy: false, error: messageOf(error) })
+    } finally {
+      setProxyTesting(false)
+    }
+  }, [rpc, proxyTesting, proxyUrl, proxyUsername, proxyPassword])
+
+  if (rpc === undefined) {
+    return <p style={styles.intro}>{t('unavailable')}</p>
+  }
+
+  return (
+    <div className="dsh-subscriptions-settings" style={styles.section}>
+      <style>{providerSettingsCss}</style>
+      <p style={styles.intro}>{t('intro')}</p>
+      <UsageBadgeDisplaySetting t={t} />
+      <div style={styles.proxyCard}>
+        <div style={styles.cardHeader}>
+          <span style={{
+            ...styles.dot,
+            background: proxy?.enabled === true
+              ? 'var(--dsw-alias-state-success-primary)'
+              : 'var(--dsw-alias-label-dimmed)',
+          }} />
+          <span style={styles.name}>{t('proxyTitle')}</span>
+          <button
+            type="button"
+            style={{ marginLeft: 'auto', flexShrink: 0 }}
+            onClick={openProxyDialog}
+          >
+            {t('proxyConfigure')}
+          </button>
+        </div>
+        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+      </div>
+      <div style={styles.separator} />
+      {PROVIDERS.map(({ id, name }) => {
+        const status = statuses[id]
+        const busy = status?.busy === true
+        const deviceCode = deviceCodes[id]
+        const accounts = status?.accounts ?? []
+        return (
+          <div key={id} style={styles.card}>
+            <div style={styles.cardHeader}>
+              <span style={{ ...styles.dot, background: dotColor(status) }} />
+              <span style={styles.name}>{status?.displayName || name}</span>
+              {status?.displayName && <small style={styles.statusLine}>{name}</small>}
+              <ClientVersionTag clientVersion={status?.clientVersion} t={t} />
+            </div>
+            <p style={styles.statusLine}>{statusText(t, status)}</p>
+            {status?.detail !== undefined && status.detail !== '' && (
+              <p style={styles.statusLine}>{status.detail}</p>
+            )}
+            {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
+            {accounts.map((account) => {
+              const usageKey = `${id}:${account.key}`
+              const usage = usages[usageKey]
+              const shownWindows = visibleUsageWindows(id, usage?.windows, status?.visibleModels)
+              const usageError = usageErrors[usageKey]
+              const display = account.account ?? account.key
+              const sortedCredits = [...(usage?.resetCredits ?? [])].sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))
+              const nextReset = sortedCredits.find(c => c.expiresAt === undefined || c.expiresAt > Date.now())
+              const resetBlock = usage ? resetActionBlock(usage) : 'resetUseRefresh'
+              const resetDisabled = resetBusy || resetBlock !== undefined
+              // Providers without a usage endpoint answer supported:false — no block.
+              const showUsage = usage?.supported !== false
+                && (usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true)
+              return (
+                <div key={account.key} style={styles.accountRow}>
+                  <div style={styles.accountHeader}>
+                    <button
+                      type="button"
+                      style={styles.starButton}
+                      title={account.isDefault ? t('defaultBadge') : t('setDefault')}
+                      onClick={() => {
+                        if (!account.isDefault) void setDefault(id, account.key)
+                      }}
+                    >
+                      {account.isDefault ? '★' : '☆'}
+                    </button>
+                    <span style={styles.accountName}>{display}</span>
+                    {account.plan !== undefined && (
+                      <span style={styles.usagePlan}>{account.plan}</span>
+                    )}
+                    {account.expiresAt !== undefined && (
+                      <span style={styles.statusLine}>
+                        {t('accountExpires', { date: new Date(account.expiresAt).toLocaleString() })}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      style={{ marginLeft: 'auto', flexShrink: 0 }}
+                      onClick={() => { void logout(id, account.key, display, name) }}
+                    >
+                      {t('logout')}
+                    </button>
+                  </div>
+                  {showUsage && (
+                    <div style={styles.usage}>
+                      <div style={styles.usageHeader}>
+                        <span style={styles.usageTitle}>{t('usageTitle')}</span>
+                        {usage?.plan !== undefined && (
+                          <span style={styles.usagePlan}>{t('usagePlan', { plan: usage.plan })}</span>
+                        )}
+                        <button
+                          type="button"
+                          style={styles.usageRefresh}
+                          disabled={usageLoading[usageKey] === true}
+                          onClick={() => { void loadUsage(id, account.key, true) }}
+                        >
+                          {t('usageRefresh')}
+                        </button>
+                      </div>
+                      {usage === undefined && usageError === undefined && (
+                        <p style={styles.statusLine}>{t('usageLoading')}</p>
+                      )}
+                      {usageError !== undefined && (
+                        <p style={styles.errorLine}>{t('usageError', { message: usageError })}</p>
+                      )}
+                      {usage?.windows !== undefined && usage.windows.length === 0 && (
+                        <p style={styles.statusLine}>{t('usageEmpty')}</p>
+                      )}
+                      {usage?.windows !== undefined && usage.windows.length > 0 && shownWindows.length === 0 && (
+                        <p style={styles.statusLine}>{t('usageNoVisibleModels')}</p>
+                      )}
+                      {shownWindows.map((window, index) => {
+                        const percent = Math.min(100, Math.max(0, window.usedPercent))
+                        return (
+                          <div key={index} style={styles.usageRow}>
+                            <div style={styles.usageMeta}>
+                              <span>{usageWindowLabel(t, window)}</span>
+                              <span>
+                                {`${String(Math.round(percent))}%`}
+                                {window.resetsAt !== undefined
+                                  && ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
+                              </span>
+                            </div>
+                            <div style={styles.usageTrack}>
+                              <div style={{ ...styles.usageFill, width: `${String(percent)}%`, background: usageBarColor(percent) }} />
+                            </div>
+                          </div>
+                        )
+                      })}
+                      {id === 'codex' && usage?.resetCreditsError !== undefined && (
+                        <p style={styles.errorLine}>{t('resetCreditsError', { message: usage.resetCreditsError })}</p>
+                      )}
+                      {id === 'codex' && usage?.resetCredits !== undefined && (
+                        <details className="subscriptions-reset-credits" style={styles.usageRow}>
+                          <summary style={{ ...styles.usageMeta, cursor: 'pointer', listStyle: 'none', justifyContent: 'flex-start', gap: 6 }}>
+                            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
+                              <path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            <span>{t('resetCreditsTitle')}</span>
+                            <span style={{ marginLeft: 'auto' }}>{t('resetCreditsAvailable', { count: usage.resetCredits.length })}</span>
+                          </summary>
+                          <style>{
+                            '.subscriptions-reset-credits > summary::-webkit-details-marker { display: none; }'
+                            + '.subscriptions-reset-credits[open] > summary > svg { transform: rotate(90deg); }'
+                          }</style>
+                          <div style={{ paddingLeft: 18, marginTop: 6 }}>
+                            {sortedCredits.map((credit, index) => (
+                              <div key={credit.id ?? index} style={{ ...styles.usageMeta, minHeight: 28, gap: 12 }}>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                                  {t('resetCreditFull')}
+                                  {credit === nextReset && (
+                                    <button type="button" aria-disabled={resetDisabled}
+                                      title={t(resetBusy ? 'resetUseChecking' : resetBlock ?? 'resetUseReady')}
+                                      style={{ height: 22, minHeight: 22, padding: '0 7px',
+                                        opacity: resetDisabled ? 0.35 : 1, cursor: resetDisabled ? 'not-allowed' : 'pointer' }}
+                                      onClick={() => { if (!resetDisabled) void prepareReset(account.key) }}>
+                                      {resetBusy && resetAccount === account.key ? t('resetUseChecking') : t('resetUseButton')}
+                                    </button>
+                                  )}
+                                </span>
+                                <span style={{ textAlign: 'right' }}>{credit.expiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(credit.expiresAt).toLocaleString() })}</span>
+                              </div>
+                            ))}
+                            {resetAccount === account.key && resetMessage && <p role="status" style={styles.statusLine}>{resetMessage}</p>}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+            <div style={styles.actions}>
+              {!busy && accounts.length === 0 && (
+                <button type="button" onClick={() => { void login(id) }}>
+                  {t('login')}
+                </button>
+              )}
+              {!busy && accounts.length > 0 && id === 'claude' && (
+                <>
+                  <button type="button" onClick={() => { void login(id, 'oauth') }}>
+                    {t('addAccountOAuth')}
+                  </button>
+                  <button type="button" onClick={() => { void login(id, 'keychain') }}>
+                    {t('addAccountKeychain')}
+                  </button>
+                </>
+              )}
+              {!busy && accounts.length > 0 && id !== 'claude' && (
+                <button type="button" onClick={() => { void login(id) }}>
+                  {t('addAccount')}
+                </button>
+              )}
+              {/* 与同排其它按钮一致：登录/取消进行中不开第二个写配置的弹窗。 */}
+              {!busy && <button type="button" aria-haspopup="dialog"
+                onClick={() => setManagedProvider({ id, name })}>
+                {t('accountsManage')}
+              </button>}
+
+              {busy && (
+                <button type="button" onClick={() => { void cancel(id) }}>
+                  {t('cancel')}
+                </button>
+              )}
+            </div>
+            {!busy && accounts.length > 0 && (
+              <p style={styles.statusLine}>{t('addAccountHint')}</p>
+            )}
+
+            {busy && deviceCode !== undefined && (
+              <div style={styles.deviceCode}>
+                <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
+                <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
+                <div style={styles.actions}>
+                  <button type="button" onClick={() => { copyDeviceCode(id, deviceCode.userCode) }}>
+                    {copiedCode === id ? t('deviceCodeCopied') : t('deviceCodeCopy')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { window.open(deviceCode.verificationUrl, '_blank', 'noopener') }}
+                  >
+                    {t('deviceCodeOpenPage')}
+                  </button>
+                </div>
+              </div>
+            )}
+            {busy && deviceCode === undefined && (
+              <details style={styles.manual}>
+                <summary>{t('manualSummary')}</summary>
+                <div style={styles.manualRow}>
+                  <input
+                    style={styles.manualInput}
+                    value={manualDrafts[id]}
+                    placeholder={t('manualPlaceholder')}
+                    onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                  />
+                  <button type="button" onClick={() => { void submitManual(id) }}>
+                    {t('submit')}
+                  </button>
+                </div>
+              </details>
+            )}
+          </div>
+        )
+      })}
+      {managedProvider && <ProviderAccountManager provider={managedProvider.id} name={managedProvider.name}
+        rpc={rpc} t={t} onClose={() => { setManagedProvider(undefined); void refresh() }} />}
+      <style>{'.subscriptions-reset-dialog::backdrop { background: var(--dsw-alias-bg-mask-1, #0006); backdrop-filter: var(--dsw-mask-blur, none); }'}</style>
+      <dialog ref={resetDialogRef} className="subscriptions-reset-dialog"
+        aria-labelledby="subscriptions-reset-title" onCancel={() => setResetConfirmation(undefined)}
+        onClose={() => setResetConfirmation(undefined)}
+        style={{ ...styles.modal, display: resetConfirmation ? 'flex' : 'none', margin: 'auto', color: 'var(--dsw-alias-label-primary)' }}>
+        {resetConfirmation && <>
+          <h3 id="subscriptions-reset-title" style={{ ...styles.modalTitle, margin: 0 }}>{t('resetUseConfirmTitle')}</h3>
+          <p style={{ ...styles.statusLine, overflowWrap: 'anywhere' }}>{statuses.codex?.accounts.find(a => a.key === resetConfirmation.account)?.account ?? resetConfirmation.account}</p>
+          <div style={{ ...styles.usageMeta, gap: 12 }}>
+            <span>{t('usageWeekly')}</span><strong>{Math.round(resetConfirmation.weeklyUsedPercent)}%</strong>
+          </div>
+          <div style={styles.usageMeta}>
+            <span>{resetConfirmation.creditExpiresAt === undefined ? t('resetCreditExpiryUnknown') : t('resetCreditExpires', { date: new Date(resetConfirmation.creditExpiresAt).toLocaleString() })}</span>
+          </div>
+          <p style={{ ...styles.statusLine, margin: '4px 0' }}>{t('resetUseWarning')}</p>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12 }}>
+            <input type="checkbox" checked={resetAcknowledged} onChange={e => setResetAcknowledged(e.target.checked)} />
+            {t('resetUseAcknowledge')}
+          </label>
+          <div className="dsh-subscription-dialog-actions" style={{ ...styles.actions, justifyContent: 'flex-end', marginTop: 8 }}>
+            <button type="button" autoFocus onClick={() => setResetConfirmation(undefined)}>{t('cancel')}</button>
+            <button type="button" className="dsh-subscription-primary"
+              style={{ opacity: resetAcknowledged ? 1 : 0.35, cursor: resetAcknowledged ? 'pointer' : 'not-allowed' }}
+              disabled={!resetAcknowledged || resetBusy}
+              onClick={() => { void consumeReset() }}>{t('resetUseConfirm')}</button>
+          </div>
+        </>}
+      </dialog>
+      {proxyOpen && (
+        <div style={styles.modalOverlay} onClick={() => setProxyOpen(false)}>
+          <div style={styles.modal} onClick={event => event.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <span style={styles.modalTitle}>{t('proxyDialogTitle')}</span>
+              <button type="button" style={{ marginLeft: 'auto' }} onClick={() => setProxyOpen(false)}>
+                {t('proxyDialogClose')}
+              </button>
+            </div>
+            <label style={styles.proxyCheck}>
+              <input type="checkbox" checked={proxyEnabled} onChange={event => setProxyEnabled(event.target.checked)} />
+              <span>{t('proxyEnabled')}</span>
+            </label>
+            <label style={styles.proxyField}>
+              <span style={styles.proxyLabel}>{t('proxyUrl')}</span>
+              <input
+                style={styles.proxyInput}
+                value={proxyUrl}
+                placeholder={t('proxyUrlPlaceholder')}
+                onChange={event => setProxyUrl(event.target.value)}
+              />
+              <p style={styles.proxyHint}>{t('proxyUrlHint')}</p>
+            </label>
+            <label style={styles.proxyField}>
+              <span style={styles.proxyLabel}>{t('proxyUsername')}</span>
+              <input
+                style={styles.proxyInput}
+                value={proxyUsername}
+                placeholder={t('proxyUsernamePlaceholder')}
+                onChange={event => setProxyUsername(event.target.value)}
+              />
+            </label>
+            <div style={styles.proxyField}>
+              <span style={styles.proxyLabel}>{t('proxyPassword')}</span>
+              <input
+                type="password"
+                style={styles.proxyInput}
+                value={proxyPassword}
+                placeholder={t('proxyPasswordPlaceholder')}
+                onChange={event => setProxyPassword(event.target.value)}
+              />
+              <label style={styles.proxyCheck}>
+                <input
+                  type="checkbox"
+                  checked={proxyClearPassword}
+                  onChange={event => setProxyClearPassword(event.target.checked)}
+                />
+                <span>{t('proxyClearPassword')}</span>
+              </label>
+            </div>
+            <label style={styles.proxyField}>
+              <span style={styles.proxyLabel}>{t('proxyBypass')}</span>
+              <input
+                style={styles.proxyInput}
+                value={proxyBypass}
+                placeholder={t('proxyBypassPlaceholder')}
+                onChange={event => setProxyBypass(event.target.value)}
+              />
+              <p style={styles.proxyHint}>{t('proxyBypassHint')}</p>
+            </label>
+            <p style={styles.proxyHint}>{t('proxyNote')}</p>
+            {proxyMessage !== undefined && (
+              <p style={{ ...styles.proxyMessage, color: messageColor(proxyMessage.tone) }}>{proxyMessage.text}</p>
+            )}
+            {proxyTestResult !== undefined && (
+              <p style={{
+                ...styles.proxyMessage,
+                color: proxyTestResult.ok
+                  ? 'var(--dsw-alias-state-success-primary)'
+                  : 'var(--dsw-alias-state-error-primary)',
+              }}>
+                {proxyTestResult.ok
+                  ? (proxyTestResult.viaProxy
+                    ? t('proxyTestOk', { status: String(proxyTestResult.status), ms: String(proxyTestResult.latencyMs) })
+                    : t('proxyTestOkDirect', { status: String(proxyTestResult.status), ms: String(proxyTestResult.latencyMs) }))
+                  : t('proxyTestFail', { message: proxyTestResult.error ?? '' })}
+              </p>
+            )}
+            <div className="dsh-subscription-dialog-actions" style={styles.proxyActions}>
+              <button
+                type="button"
+                disabled={proxyTesting}
+                onClick={() => { void testProxy() }}
+              >
+                {proxyTesting ? t('proxyTesting') : t('proxyTest')}
+              </button>
+              <button
+                type="button"
+                className="dsh-subscription-primary"
+                disabled={proxySaving}
+                onClick={() => { void saveProxy() }}
+              >
+                {proxySaving ? t('proxySaving') : t('proxySave')}
+              </button>
+              <button type="button" onClick={() => setProxyOpen(false)}>
+                {t('proxyCancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

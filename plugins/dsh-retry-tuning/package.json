@@ -1,0 +1,44 @@
+{
+  "name": "dsh-retry-tuning",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Makes model-request retry timing visible and adjustable in Settings: the wait before each retry, the ceiling, jitter, and how a provider-disclosed reset is honored.",
+  "license": "Apache-2.0",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": false,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1 || 3.18.5-alpha.1 || 3.18.5-alpha.2"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "dshNextModificationNotice": "Modified 2026-11-05: moved the existing DSH version requirement to engines.dsh without changing its range."
+}

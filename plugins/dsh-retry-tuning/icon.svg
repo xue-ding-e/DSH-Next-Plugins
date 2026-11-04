@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <!-- A clock face whose hand is a repeating attempt: the subject is the WAIT
+       before a retry, not the retry itself, so the dial carries the meaning and
+       the arrow only says "again". -->
+  <circle cx="10.5" cy="12" r="6.5"/>
+  <path d="M10.5 8.5V12l2.5 1.6"/>
+  <path d="M18.2 6.2a8.6 8.6 0 0 1 0 11.6"/>
+  <path d="M17 3.6l1.2 2.6-2.7.7"/>
+</svg>

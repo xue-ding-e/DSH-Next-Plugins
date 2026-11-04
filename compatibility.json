@@ -1,0 +1,1311 @@
+{
+  "schemaVersion": 1,
+  "hostRefs": {
+    "official": {
+      "ref": "upstream/master",
+      "commit": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+      "version": "0.2.2-rc.1"
+    },
+    "next": {
+      "ref": "1813d724",
+      "commit": "1813d72421df0a0675df18f219d3a28cae640da7",
+      "version": "0.2.1-rc.3"
+    }
+  },
+  "evidencePolicy": {
+    "hostSource": "git show <commit>:<path>; current Harness worktrees are not compatibility evidence",
+    "scope": "Static API review plus controlled mocked function probes; no real Harness profile was started.",
+    "runtimeVerified": false,
+    "unverified": [
+      "Native profile installation and dependency resolution",
+      "Actual Cordis activation and teardown",
+      "Browser or desktop UI rendering and interaction",
+      "Real provider authentication, token refresh, model requests and imported-session replay"
+    ],
+    "probe": {
+      "script": "scripts/compat-probe.mjs",
+      "results": ".staging/compat-probe/results.json",
+      "command": "node --experimental-vm-modules scripts/compat-probe.mjs --host-repo <git-checkout-with-both-host-refs> --summary",
+      "node": "v26.13.0",
+      "harnessProfileStarted": false,
+      "realCredentialReads": 0,
+      "realBrowserOrOsInput": 0,
+      "externalNetworkOrProcessOrWriteAttempts": [],
+      "requirements": [
+        "Node with vm.SourceTextModule support",
+        "A Git checkout containing both pinned Host commits",
+        "Existing typescript and semver tooling dependencies in that checkout"
+      ]
+    }
+  },
+  "installation": {
+    "officialPreflight": {
+      "accepted": 9,
+      "rejected": 0,
+      "includePrerelease": true,
+      "evidence": {
+        "ref": "official",
+        "path": "packages/boot/app-boot/src/plugin-compatibility.ts",
+        "line": 52,
+        "subject": "Native DSH range evaluation"
+      }
+    },
+    "nestedDshEngines": {
+      "status": "none",
+      "affected": [],
+      "requiredLocation": "package.json engines.dsh"
+    },
+    "sourceIndependence": {
+      "staticResult": "No absolute runtime imports, executable drive-path string literals, or missing relative ESM imports in published lib/client JS were found. Host packages and declared third-party dependencies are still required.",
+      "harnessSourceCheckoutRequired": false,
+      "absoluteRuntimeImports": 0,
+      "executableDrivePathLiterals": 0,
+      "missingPublishedRelativeEsmImports": 0,
+      "namedHostImportSitesMatched": 28,
+      "dependencyResolutionVerified": false
+    }
+  },
+  "plugins": [
+    {
+      "name": "dsh-browser-control",
+      "version": "1.0.1",
+      "status": "static-interfaces-matched-runtime-unverified",
+      "host": {
+        "requiredServices": [
+          "tools",
+          "connection",
+          "webServer"
+        ],
+        "calls": [
+          "tools.register(ToolDefinition)",
+          "connection.admit(request)",
+          "webServer.register(WebRoute)"
+        ],
+        "optionalServices": [
+          "attachments.saveImage"
+        ]
+      },
+      "client": {
+        "services": [
+          "connection"
+        ],
+        "slots": [],
+        "calls": [
+          "connection.rpc.call(channel, endpoint, payload, signal)",
+          "connection/reset"
+        ],
+        "desktopRequirements": [
+          "Primary Electron window with webviewTag",
+          "Sidebar webview[data-sidebar-browser-frame] exposing executeJavaScript/loadURL/getURL",
+          "Existing desktop.browser acquire/release/onOpenRequested bridge creates the guest"
+        ]
+      },
+      "confirmedGaps": [],
+      "mockedProbe": {
+        "plugin": "dsh-browser-control",
+        "outcome": "apply-returned-with-mocks",
+        "tools": [
+          "browser_goto",
+          "browser_snapshot",
+          "browser_click",
+          "browser_fill",
+          "browser_read_text",
+          "browser_eval"
+        ],
+        "providers": [],
+        "routeCount": 2,
+        "events": [],
+        "pendingServices": [],
+        "mockReadCount": 0
+      },
+      "runtimeUnverified": [
+        "Six non-screenshot browser actions",
+        "Guest creation/readiness and RPC long polling in real Electron",
+        "Web iframe mode cannot be assumed to support guest scripting"
+      ],
+      "minimumDecoupling": [
+        "Use a public sidebar-browser automation service/provider rather than DOM probing of Electron webview elements.",
+        "A future screenshot provider needs a lease-scoped native capture API owned by Desktop; the current package advertises six actions only."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-browser-control/lib/index.js",
+          "line": 30,
+          "subject": "Host injections"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-browser-control/lib/index.js",
+          "line": 426,
+          "subject": "Six tool registrations"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-browser-control/lib/client.js",
+          "line": 32,
+          "subject": "Private DOM selector"
+        },
+        {
+          "ref": "official",
+          "path": "apps/desktop/src/preload-browser.ts",
+          "line": 19,
+          "subject": "Existing browser bridge"
+        },
+        {
+          "ref": "official",
+          "path": "apps/desktop/src/main.ts",
+          "line": 292,
+          "subject": "Primary webviewTag"
+        }
+      ],
+      "manifestClientInject": [
+        "@deepseek-ai/dsh-client-connection"
+      ],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "8b87a7c34294c8fdeeafc3bb7b166e14de76e9ac209ee3f0de0095cb43bfdfec",
+        "runtimeJavaScriptFiles": 2,
+        "runtimeTreeSha256": "701ac071e91ae732df01414e930bd88815897aac53c74a8125634f42f2c5a4ed",
+        "hostEntrypoint": "lib/index.js",
+        "hostEntrypointSha256": "68cb5e845e6d6e081512b54e8853bbadefd30543109c681417e7bf9f1d4f048b",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [],
+      "capabilities": {
+        "registeredTools": [
+          "browser_goto",
+          "browser_snapshot",
+          "browser_click",
+          "browser_fill",
+          "browser_read_text",
+          "browser_eval"
+        ],
+        "screenshot": {
+          "status": "not-provided",
+          "registered": false,
+          "clientCase": false,
+          "desktopCaptureApi": false
+        }
+      }
+    },
+    {
+      "name": "dsh-bsk-bridge",
+      "version": "0.1.2",
+      "status": "static-interfaces-matched-runtime-unverified",
+      "host": {
+        "requiredServices": [
+          "tools"
+        ],
+        "calls": [
+          "tools.register(ToolDefinition)",
+          "node:child_process.execFile"
+        ]
+      },
+      "client": null,
+      "confirmedGaps": [],
+      "requirements": [
+        "An installed bsk CLI, its daemon and browser extension",
+        "Version 0.1.2 requires an explicit browser ID for session start; the default profile browser value is empty"
+      ],
+      "runtimeUnverified": [
+        "Actual CLI executable discovery, argument handling and daemon availability",
+        "Real browser lifecycle and model tool execution"
+      ],
+      "minimumDecoupling": [
+        "Keep the CLI dependency explicit and preserve explicit browser binding; no Next Desktop IPC is required."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-bsk-bridge/lib/index.js",
+          "line": 27,
+          "subject": "Native child-process import"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-bsk-bridge/lib/index.js",
+          "line": 173,
+          "subject": "Explicit browser binding"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-bsk-bridge/lib/index.js",
+          "line": 202,
+          "subject": "Two tool registrations"
+        },
+        {
+          "ref": "official",
+          "path": "packages/core/tools/src/contracts.ts",
+          "line": 26,
+          "subject": "Public ToolDefinition"
+        }
+      ],
+      "manifestClientInject": [],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "3e8da4fb1f726ed6d879b35797affbab3d3604f39e864255c6053db6cd42dd61",
+        "runtimeJavaScriptFiles": 1,
+        "runtimeTreeSha256": "5e468aa381fef5648fbc4c2c160ef70c22ef5524bf84f5fbc173f9183fda712e",
+        "hostEntrypoint": "lib/index.js",
+        "hostEntrypointSha256": "2356f8543ba7b61034a86463c6056b12cac009a8d89cc7188f7459b9d55cb05a",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [],
+      "mockedProbe": {
+        "plugin": "dsh-bsk-bridge",
+        "outcome": "apply-returned-with-mocks",
+        "tools": [
+          "bsk_session",
+          "bsk"
+        ],
+        "providers": [],
+        "routeCount": 0,
+        "events": [],
+        "pendingServices": [],
+        "mockReadCount": 0
+      }
+    },
+    {
+      "name": "dsh-chat-import",
+      "version": "0.26.4-fix.2",
+      "status": "static-interfaces-matched-runtime-unverified",
+      "host": {
+        "requiredServices": [
+          "sessionPersistence",
+          "fs",
+          "tools"
+        ],
+        "optionalServices": [
+          "webServer",
+          "settings",
+          "commands",
+          "skills",
+          "agents",
+          "agentPresets",
+          "workspaceRegistry",
+          "sessionProjectionCache",
+          "attachments"
+        ],
+        "calls": [
+          "sessionPersistence.list/open/create",
+          "SessionHandle.read/append/flush/close",
+          "agents.create with seed/setup",
+          "defineTool/tools.register",
+          "webServer.register",
+          "settings.describe/update/configure"
+        ]
+      },
+      "client": {
+        "services": [
+          "slots",
+          "locale",
+          "sidebarRightTabs"
+        ],
+        "optionalServices": [
+          "sidebarRight",
+          "configForms"
+        ],
+        "slots": [
+          "sidebar.right.pane.tab",
+          "sidebar.footer.action",
+          "shell.overlay",
+          "settings.section",
+          "plugins.bundle.config"
+        ],
+        "sharedModules": [
+          "react",
+          "@deepseek-ai/dsh-client-ui-primitives"
+        ],
+        "optionalUnavailableSlots": [
+          "plugins.bundle.config legacy settings seat"
+        ]
+      },
+      "confirmedGaps": [],
+      "requirements": [
+        "fzstd runtime dependency",
+        "Current native Session format is 4; V3/V4 conversion and replay still need a real isolated profile.",
+        "Incremental import requires an unloaded conversation; live Agent ownership is refused."
+      ],
+      "runtimeUnverified": [
+        "New-session import and resume against real profile persistence",
+        "25+ source converters, attachments, V3/V4 migration and round trips",
+        "Workspace grouping, UI and real incremental write-handle ownership"
+      ],
+      "minimumDecoupling": [
+        "Retain the public write-handle append/flush/close path and live-conversation refusal.",
+        "Use the published session-format and persistence APIs; avoid expanding mirrored core migration/validation code."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-chat-import/lib/index.mjs",
+          "line": 51,
+          "subject": "Required Host services"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-chat-import/lib/host-session.mjs",
+          "line": 302,
+          "subject": "Current write-handle append and live refusal"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-chat-import/lib/host-session.mjs",
+          "line": 506,
+          "subject": "New-session handle adaptation"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-chat-import/lib/client.js",
+          "line": 4773,
+          "subject": "Client injections"
+        },
+        {
+          "ref": "official",
+          "path": "packages/session/session-persistence/src/index.ts",
+          "line": 159,
+          "subject": "Handle-returning service API"
+        },
+        {
+          "ref": "official",
+          "path": "packages/session/session-persistence/src/handle.ts",
+          "line": 97,
+          "subject": "Append belongs to SessionHandle"
+        },
+        {
+          "ref": "next",
+          "path": "packages/session/session-persistence/src/index.ts",
+          "line": 174,
+          "subject": "Same handle API in Next"
+        }
+      ],
+      "manifestClientInject": [
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "ac2ba06b375c22efff7f6281f9c5cffc311f7752f1b5c282e54bc24e8a9ea3dc",
+        "runtimeJavaScriptFiles": 156,
+        "runtimeTreeSha256": "60fadd78d28c0f750a52a6658f301c32e8f8345026ddcb6afc97ddecc40f40b7",
+        "hostEntrypoint": "./lib/index.mjs",
+        "hostEntrypointSha256": "8ad03143204298454d1c4e6bd46487682d31e183f71a29eb8d2f3a8325cf59e1",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [
+        {
+          "module": "@deepseek-ai/dsh-tools",
+          "name": "defineTool",
+          "official": {
+            "path": "packages/core/tools/src/schema.ts",
+            "line": 555
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-tools",
+          "name": "defineTool",
+          "official": {
+            "path": "packages/core/tools/src/schema.ts",
+            "line": 555
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-tools",
+          "name": "defineTool",
+          "official": {
+            "path": "packages/core/tools/src/schema.ts",
+            "line": 555
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-tools",
+          "name": "defineTool",
+          "official": {
+            "path": "packages/core/tools/src/schema.ts",
+            "line": 555
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-tools",
+          "name": "defineTool",
+          "official": {
+            "path": "packages/core/tools/src/schema.ts",
+            "line": 555
+          }
+        }
+      ],
+      "mockedProbe": {
+        "outcome": "current-write-handle-path-completed-with-mocks",
+        "trace": [
+          [
+            "open",
+            "probe-session",
+            "write"
+          ],
+          [
+            "append",
+            0
+          ],
+          [
+            "flush"
+          ],
+          [
+            "close"
+          ]
+        ],
+        "liveSessionRefused": true
+      },
+      "reportedOwnerTests": {
+        "count": 5,
+        "result": "passed",
+        "evidence": "Human user reported current-handle append tests and live refusal; not run by this audit."
+      }
+    },
+    {
+      "name": "dsh-input-guard",
+      "version": "1.0.1",
+      "status": "static-interfaces-matched-runtime-unverified",
+      "host": {
+        "requiredServices": [
+          "webServer"
+        ],
+        "calls": [
+          "webServer.register(WebRoute)"
+        ]
+      },
+      "client": {
+        "services": [
+          "slots"
+        ],
+        "slots": [
+          "shell.overlay"
+        ],
+        "sharedModules": [
+          "react"
+        ]
+      },
+      "confirmedGaps": [],
+      "requirements": [
+        "A driver must explicitly use /tool-input-guard request/beat/state/stop/release; this is a cooperative consent banner, not an OS input interceptor."
+      ],
+      "runtimeUnverified": [
+        "Banner rendering and Stop response in an actual profile",
+        "Cooperative driver adoption; browser-control and bsk are not automatically gated by this plugin"
+      ],
+      "minimumDecoupling": [
+        "Expose the lease API through a public input-authorization service if integrated drivers need a common policy."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-input-guard/lib/index.js",
+          "line": 95,
+          "subject": "HTTP route registration"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-input-guard/lib/client.js",
+          "line": 185,
+          "subject": "shell.overlay contribution"
+        },
+        {
+          "ref": "official",
+          "path": "packages/client/ui-layout/src/client/index.ts",
+          "line": 107,
+          "subject": "Public shell.overlay slot"
+        }
+      ],
+      "manifestClientInject": [
+        "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "45ec42d510db87bbcace33b90acf3c0973aa9902257fb787f7b4fc2d6b15277d",
+        "runtimeJavaScriptFiles": 2,
+        "runtimeTreeSha256": "0f4e21f0f017b1f222509856876aac7e194f45bfaa14e8d09e79ad753b864fe6",
+        "hostEntrypoint": "lib/index.js",
+        "hostEntrypointSha256": "186195aba87f806b035be504a897588a37e38603c92e3a426156ca69044c03a3",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [],
+      "mockedProbe": {
+        "plugin": "dsh-input-guard",
+        "outcome": "apply-returned-with-mocks",
+        "tools": [],
+        "providers": [],
+        "routeCount": 1,
+        "events": [],
+        "pendingServices": [],
+        "mockReadCount": 0
+      }
+    },
+    {
+      "name": "dsh-nav-buttons",
+      "version": "1.0.1",
+      "status": "partial-static-compatibility",
+      "host": {
+        "requiredServices": [
+          "webServer"
+        ],
+        "calls": [
+          "webServer.register(WebRoute)"
+        ]
+      },
+      "client": {
+        "services": [
+          "sessions",
+          "layout",
+          "sidebarRight",
+          "uiWorkspace"
+        ],
+        "slots": [],
+        "calls": [
+          "sessions.list.getSnapshot/subscribe",
+          "layout.panelInfo.getSnapshot/subscribe",
+          "layout.selectPanel",
+          "sidebarRight.active/focus",
+          "sidebarRight.mounted.subscribe",
+          "uiWorkspace.openSession"
+        ],
+        "desktopRequirements": [
+          "globalThis.dshDesktop.protocolVersion === 1",
+          "globalThis.dshDesktop.navigation.subscribe(listener)"
+        ]
+      },
+      "confirmedGaps": [
+        {
+          "capability": "Native side-button navigation",
+          "kind": "next-only-desktop-interface",
+          "detail": "Next forwards Windows AppCommand browser-backward/browser-forward over navigationCommand and exposes navigation.subscribe. Official exposes neither. The actual global is dshDesktop, not __DSH_DESKTOP__."
+        }
+      ],
+      "runtimeUnverified": [
+        "DOM auxclick/mouseup and Alt+Arrow fallbacks",
+        "Unified session/panel/tab history behavior and selection restoration",
+        "Actual Windows AppCommand delivery"
+      ],
+      "minimumDecoupling": [
+        "Keep client history on the existing public navigation services.",
+        "Make native navigation a versioned optional Desktop capability, or document fallback-only behavior on official Desktop.",
+        "Declare the ui-workspace module provider in advisory client dependency metadata when updating package metadata."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-nav-buttons/lib/client.js",
+          "line": 632,
+          "subject": "Optional native bridge"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-nav-buttons/lib/client.js",
+          "line": 884,
+          "subject": "Client injections"
+        },
+        {
+          "ref": "official",
+          "path": "packages/client/ui-workspace/src/client/navigation.ts",
+          "line": 195,
+          "subject": "uiWorkspace still exists"
+        },
+        {
+          "ref": "official",
+          "path": "apps/desktop/src/ipc.ts",
+          "line": 93,
+          "subject": "Official Desktop API lacks navigation"
+        },
+        {
+          "ref": "next",
+          "path": "apps/desktop/src/ipc.ts",
+          "line": 27,
+          "subject": "Next navigationCommand"
+        },
+        {
+          "ref": "next",
+          "path": "apps/desktop/src/preload-app.ts",
+          "line": 28,
+          "subject": "Next navigation.subscribe"
+        },
+        {
+          "ref": "next",
+          "path": "apps/desktop/src/main.ts",
+          "line": 264,
+          "subject": "Next AppCommand listener"
+        }
+      ],
+      "manifestClientInject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-api-workspace-controller"
+      ],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "15a4dec626ea76b392ae52c5b0de78b565a70d6e87277f16ac7fe5a7e0ae6ae4",
+        "runtimeJavaScriptFiles": 3,
+        "runtimeTreeSha256": "901165704e3950cfe421ef2e181452d03e6c9aa40a1c2e3ce124c6b161e332b4",
+        "hostEntrypoint": "lib/index.js",
+        "hostEntrypointSha256": "f21a954e2f20fdcebe78d4dee55d33aeb0b4e499ab641933e0f5e09f5dca982f",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [],
+      "mockedProbe": {
+        "plugin": "dsh-nav-buttons",
+        "outcome": "apply-returned-with-mocks",
+        "tools": [],
+        "providers": [],
+        "routeCount": 1,
+        "events": [],
+        "pendingServices": [],
+        "mockReadCount": 0
+      }
+    },
+    {
+      "name": "dsh-plugin-subscriptions",
+      "version": "0.9.13",
+      "status": "static-interfaces-matched-runtime-unverified",
+      "host": {
+        "requiredServices": [
+          "llm"
+        ],
+        "optionalServices": [
+          "connection",
+          "tools",
+          "web",
+          "attachments",
+          "agents"
+        ],
+        "calls": [
+          "llm.registerAdapter and registrationHandle.replace",
+          "connection.fetch.register exact POST /api/subscriptions-auth.*",
+          "tools.register/defineTool/restrict",
+          "web.registerSearchProvider"
+        ]
+      },
+      "client": {
+        "services": [
+          "slots",
+          "connection",
+          "locale"
+        ],
+        "optionalServices": [
+          "modelDirectories",
+          "commandUi"
+        ],
+        "slots": [
+          "settings.section",
+          "tool.call.toolview",
+          "conversation.input.right",
+          "conversation.composer.dock"
+        ],
+        "sharedModules": [
+          "react",
+          "react/jsx-runtime",
+          "react-dom",
+          "@deepseek-ai/dsh-client-ui-primitives"
+        ]
+      },
+      "confirmedGaps": [],
+      "requirements": [
+        "undici runtime dependency",
+        "Antigravity requires an application OAuth client configuration for login/refresh; none is bundled"
+      ],
+      "antigravity": {
+        "defaultProviderEnabled": true,
+        "applicationConfigResolvedAt": [
+          "login",
+          "authorization-code exchange",
+          "token refresh"
+        ],
+        "blocksSynchronousApplyWithoutConfig": false,
+        "mockedDefaultRegistration": {
+          "providers": [
+            "codex",
+            "claude",
+            "grok",
+            "copilot",
+            "antigravity"
+          ],
+          "authRouteCount": 20,
+          "tools": [
+            "x_search",
+            "video_generate",
+            "image_generate"
+          ]
+        },
+        "emptyStoreReturnsNoAntigravityModels": true,
+        "verification": "Published lib/index.js apply returned in isolated VM with empty environment, all persistence reads mocked as ENOENT, network/process/writes denied. This is not real-profile startup."
+      },
+      "runtimeUnverified": [
+        "Native dependency installation and Cordis activation",
+        "All provider logins, refreshes, catalogs and streaming",
+        "Real model picker, tools and settings rendering"
+      ],
+      "minimumDecoupling": [
+        "Represent unconfigured Antigravity login explicitly while keeping provider registration lazy.",
+        "Use existing LLM, exact Fetch-route, tools, web-search and slot APIs; no Next Desktop bridge is required."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-plugin-subscriptions/lib/index.js",
+          "line": 9849,
+          "subject": "OAuth configuration resolver"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-plugin-subscriptions/lib/index.js",
+          "line": 11722,
+          "subject": "Login resolves OAuth application config"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-plugin-subscriptions/lib/index.js",
+          "line": 12084,
+          "subject": "Token refresh resolves OAuth config lazily"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-plugin-subscriptions/src/index.ts",
+          "line": 987,
+          "subject": "Antigravity adapter registration"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-plugin-subscriptions/src/auth/rpc.ts",
+          "line": 656,
+          "subject": "Exact Fetch-route registration"
+        },
+        {
+          "ref": "official",
+          "path": "packages/client/connection/src/rpc-host.ts",
+          "line": 114,
+          "subject": "Public connection.fetch registry"
+        },
+        {
+          "ref": "official",
+          "path": "packages/llm/llm/src/index.ts",
+          "line": 401,
+          "subject": "Adapter registration"
+        }
+      ],
+      "manifestClientInject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "fc33039a1a68c0f3f03ecd753c305abba4b9a333fc805b69c9664be0ba1de9a4",
+        "runtimeJavaScriptFiles": 2,
+        "runtimeTreeSha256": "e6eebb361cc9768c4c25ea4325b92ff4a062484a10ce78c90a022a5797492aa3",
+        "hostEntrypoint": "lib/index.js",
+        "hostEntrypointSha256": "5dc558416bde8257274ce5a9704d5eb3e443fadd8bfad4c792e940079483d4a3",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [
+        {
+          "module": "@deepseek-ai/schemastery",
+          "name": "default",
+          "official": {
+            "path": "vendor/schemastery/src/index.ts",
+            "line": 962
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "CONTEXT_WINDOW_EXCEEDED_CODE",
+          "official": {
+            "path": "packages/llm/llm/src/error.ts",
+            "line": 25
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "EMPTY_RESPONSE_CODE",
+          "official": {
+            "path": "packages/llm/llm/src/error.ts",
+            "line": 42
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "LlmAdapter",
+          "official": {
+            "path": "packages/llm/llm/src/index.ts",
+            "line": 208
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "LlmError",
+          "official": {
+            "path": "packages/llm/llm/src/index.ts",
+            "line": 96
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "QUOTA_EXCEEDED_CODE",
+          "official": {
+            "path": "packages/llm/llm/src/error.ts",
+            "line": 28
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "ReasoningEffortId",
+          "official": {
+            "path": "packages/llm/llm/src/brand.ts",
+            "line": 74
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "attributionHeaders",
+          "official": {
+            "path": "packages/llm/llm/src/attribution.ts",
+            "line": 64
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "errorChain",
+          "official": {
+            "path": "packages/llm/llm/src/error.ts",
+            "line": 117
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "isContextWindowExceededError",
+          "official": {
+            "path": "packages/llm/llm/src/error.ts",
+            "line": 83
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "isQuotaExceededError",
+          "official": {
+            "path": "packages/llm/llm/src/error.ts",
+            "line": 97
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "resolveRetryPolicy",
+          "official": {
+            "path": "packages/llm/llm/src/retry-policy.ts",
+            "line": 149
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-home-paths",
+          "name": "dshHomePath",
+          "official": {
+            "path": "packages/util/home-paths/src/index.ts",
+            "line": 160
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-attachment",
+          "name": "AttachmentId",
+          "official": {
+            "path": "packages/attachment/attachment/src/index.ts",
+            "line": 23
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-web",
+          "name": "WebError",
+          "official": {
+            "path": "packages/web/web/src/index.ts",
+            "line": 24
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-tools",
+          "name": "defineTool",
+          "official": {
+            "path": "packages/core/tools/src/schema.ts",
+            "line": 555
+          }
+        }
+      ],
+      "mockedProbe": {
+        "plugin": "dsh-plugin-subscriptions",
+        "outcome": "apply-returned-with-mocks",
+        "tools": [
+          "x_search",
+          "video_generate",
+          "image_generate"
+        ],
+        "providers": [
+          "codex",
+          "claude",
+          "grok",
+          "copilot",
+          "antigravity"
+        ],
+        "routeCount": 20,
+        "events": [
+          "agent/created"
+        ],
+        "pendingServices": [],
+        "mockReadCount": 12
+      }
+    },
+    {
+      "name": "dsh-qoder-connect",
+      "version": "0.6.1",
+      "status": "static-interfaces-matched-runtime-unverified",
+      "host": {
+        "requiredServices": [
+          "llm"
+        ],
+        "optionalServices": [
+          "webServer",
+          "attachments",
+          "fs"
+        ],
+        "calls": [
+          "llm.registerAdapter",
+          "PiAiAdapter({profiles, auth, resolveApiKey, resolveAttachments, resolveImageAccess})",
+          "resolveImageAttachmentAccess",
+          "resolveRetryPolicy",
+          "webServer.register"
+        ]
+      },
+      "client": {
+        "services": [
+          "slots"
+        ],
+        "slots": [
+          "settings.section"
+        ],
+        "sharedModules": [
+          "react"
+        ]
+      },
+      "confirmedGaps": [],
+      "runtimeUnverified": [
+        "Pi-ai 1.3.x provider construction and lazy API module",
+        "Local shim bind/stop, PAT login, catalog and inference",
+        "Web settings routes and native profile installation"
+      ],
+      "minimumDecoupling": [
+        "Keep explicit supported old/new peer ranges tied to source-level adapter tests.",
+        "Keep the Qoder protocol/shim plugin-owned and reuse the installed public PiAiAdapter instead of copying Harness adapter code."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-qoder-connect/package.json",
+          "line": 43,
+          "subject": "Explicit supported old/new DSH peers"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-qoder-connect/lib/index.js",
+          "line": 217,
+          "subject": "Public PiAiAdapter options"
+        },
+        {
+          "ref": "official",
+          "path": "packages/llm/llm-pi-ai/src/adapter.ts",
+          "line": 86,
+          "subject": "Current constructor options"
+        },
+        {
+          "ref": "official",
+          "path": "packages/boot/app-boot/src/plugin-compatibility.ts",
+          "line": 65,
+          "subject": "DSH peer preflight"
+        }
+      ],
+      "manifestClientInject": [],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "a12d606805956b45d30ad67c4ec5aab1d3a741684ef2b98c09517f6adf93da5b",
+        "runtimeJavaScriptFiles": 5,
+        "runtimeTreeSha256": "d1e290433f17f11552ec7531f2b750c1b0ab10f0dbcf244d979ed2d777329e80",
+        "hostEntrypoint": "lib/index.js",
+        "hostEntrypointSha256": "1cbdbcd8d677ee260b51e2fa7dfe7f675f57ec1312208517fa370e9dbbb42610",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [
+        {
+          "module": "@deepseek-ai/schemastery",
+          "name": "default",
+          "official": {
+            "path": "vendor/schemastery/src/index.ts",
+            "line": 962
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm-pi-ai",
+          "name": "PiAiAdapter",
+          "official": {
+            "path": "packages/llm/llm-pi-ai/src/index.ts",
+            "line": 78
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "resolveImageAttachmentAccess",
+          "official": {
+            "path": "packages/llm/llm/src/content.ts",
+            "line": 35
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "resolveRetryPolicy",
+          "official": {
+            "path": "packages/llm/llm/src/retry-policy.ts",
+            "line": 149
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-llm",
+          "name": "RetryPolicySchema",
+          "official": {
+            "path": "packages/llm/llm/src/retry-policy.ts",
+            "line": 100
+          }
+        },
+        {
+          "module": "@deepseek-ai/dsh-home-paths",
+          "name": "resolveDshHome",
+          "official": {
+            "path": "packages/util/home-paths/src/index.ts",
+            "line": 135
+          }
+        }
+      ],
+      "mockedProbe": null,
+      "requirements": [
+        "Install the declared published Cordis, schemastery, pi-ai and DSH peers; package-manager dependency resolution has not been executed by this audit."
+      ],
+      "reportedOwnerTests": {
+        "host": "official",
+        "count": 33,
+        "result": "passed",
+        "evidence": "Human user reported source-level Qoder tests against the upstream checkout; not run by this audit and not a real-profile or authentication result."
+      }
+    },
+    {
+      "name": "dsh-retry-tuning",
+      "version": "1.0.1",
+      "status": "static-interfaces-matched-runtime-unverified",
+      "host": {
+        "requiredServices": [],
+        "calls": [
+          "agent/request-error waterfall with prepend",
+          "session.snapshotEvents",
+          "session.append(llm/retry)",
+          "session.append(llm/retry-started)"
+        ]
+      },
+      "client": {
+        "services": [
+          "slots",
+          "locale",
+          "configForms"
+        ],
+        "slots": [
+          "settings.section"
+        ],
+        "calls": [
+          "configForms.get(retry-tuning)",
+          "locale.bind"
+        ],
+        "sharedModules": [
+          "react"
+        ]
+      },
+      "confirmedGaps": [],
+      "runtimeUnverified": [
+        "Actual waterfall ordering and native retry accounting",
+        "Volatile config updates and settings persistence",
+        "Cancellation, resume and recorded-session rendering"
+      ],
+      "minimumDecoupling": [
+        "Retain the public waterfall and durable retry events; preserve structural-error delegation."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-retry-tuning/lib/index.js",
+          "line": 117,
+          "subject": "Request-error listener"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-retry-tuning/lib/client.js",
+          "line": 177,
+          "subject": "ConfigForms namespace"
+        },
+        {
+          "ref": "official",
+          "path": "packages/core/agent/src/runtime-types.ts",
+          "line": 389,
+          "subject": "Public request-error payload"
+        },
+        {
+          "ref": "official",
+          "path": "packages/client/ui-settings/src/client/contract/slots.ts",
+          "line": 57,
+          "subject": "Public settings.section slot"
+        }
+      ],
+      "manifestClientInject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "7b4448367e51befe487ad6887e6cdc2c5286312dda838a6512c2da56f46e8ab9",
+        "runtimeJavaScriptFiles": 3,
+        "runtimeTreeSha256": "8231953b5cd9c65c4cac134623427a813a79984e44cba1ec6d453b2715f9de61",
+        "hostEntrypoint": "lib/index.js",
+        "hostEntrypointSha256": "26d3a0ebee977f0a5522c9520ee524159f2e8ba38b155f3cba5e59d7c2045386",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [
+        {
+          "module": "@deepseek-ai/schemastery",
+          "name": "default",
+          "official": {
+            "path": "vendor/schemastery/src/index.ts",
+            "line": 962
+          }
+        }
+      ],
+      "mockedProbe": {
+        "plugin": "dsh-retry-tuning",
+        "outcome": "apply-returned-with-mocks",
+        "tools": [],
+        "providers": [],
+        "routeCount": 0,
+        "events": [
+          "agent/request-error"
+        ],
+        "pendingServices": [],
+        "mockReadCount": 0
+      }
+    },
+    {
+      "name": "dsh-whale-boot",
+      "version": "1.0.1",
+      "status": "static-interfaces-matched-runtime-unverified",
+      "host": {
+        "requiredServices": [],
+        "optionalServices": [
+          "webServer"
+        ],
+        "calls": [
+          "webServer.register(WebRoute)",
+          "webserver/index-inject(IndexInjection[])"
+        ]
+      },
+      "client": null,
+      "confirmedGaps": [],
+      "requirements": [
+        "No video is shipped. Supply DSH_WHALE_BOOT_VIDEO or a local package assets/intro.mp4; without media the error handler removes the curtain."
+      ],
+      "runtimeUnverified": [
+        "Native profile index injection",
+        "Video loading/autoplay/audio policy, skip and curtain removal"
+      ],
+      "minimumDecoupling": [
+        "Continue using structured index injection and a package-relative media route; keep optional media outside Harness core."
+      ],
+      "evidence": [
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-whale-boot/lib/index.js",
+          "line": 45,
+          "subject": "Environment or package-relative video path"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-whale-boot/lib/index.js",
+          "line": 350,
+          "subject": "Optional webServer registration"
+        },
+        {
+          "ref": "plugin",
+          "path": "plugins/dsh-whale-boot/lib/index.js",
+          "line": 371,
+          "subject": "Structured index injection"
+        },
+        {
+          "ref": "official",
+          "path": "packages/host/webserver/src/index.ts",
+          "line": 44,
+          "subject": "Public injection event"
+        }
+      ],
+      "manifestClientInject": [],
+      "officialPreflight": {
+        "status": "not-rejected",
+        "constrainedByDshRanges": true
+      },
+      "artifacts": {
+        "manifestSha256": "f04cca04d6c6a13df6b33c7cdb516bca553303d7840efae5f4fc2ce3f2757fc4",
+        "runtimeJavaScriptFiles": 1,
+        "runtimeTreeSha256": "fc9c18000d863cc2a30bed1e8b839f7760ac1e919c14e6e843d8913e131f5f45",
+        "hostEntrypoint": "lib/index.js",
+        "hostEntrypointSha256": "b111709c48dee04d8415430831854b9dbffa69e4770a1a7e5cf8c28bec0411e6",
+        "runtimeTreeHashAlgorithm": "sha256 over codepoint-sorted package-relative-path LF file-sha256 LF pairs; JavaScript only"
+      },
+      "runtimeVerification": "not-run",
+      "namedHostExports": [],
+      "mockedProbe": {
+        "plugin": "dsh-whale-boot",
+        "outcome": "apply-returned-with-mocks",
+        "tools": [],
+        "providers": [],
+        "routeCount": 1,
+        "events": [
+          "webserver/index-inject"
+        ],
+        "pendingServices": [],
+        "mockReadCount": 0
+      }
+    }
+  ]
+}

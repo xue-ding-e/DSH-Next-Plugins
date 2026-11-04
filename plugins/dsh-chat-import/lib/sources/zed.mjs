@@ -1,0 +1,172 @@
+// lib/sources/zed.mjs — Zed 线程库（threads.db）读取与导入编排
+//
+// 库 = <data_dir>/threads/threads.db（路径规则见 lib/convert/zed.mjs，发现层与导入层共用）。
+// 单表 `threads`（无索引、无其它表）：id / summary / updated_at / data_type / data BLOB /
+// parent_id / folder_paths / folder_paths_order / created_at。
+//   · `data_type ∈ {json, zstd}`，**写入端恒 zstd**（等级 3 的标准帧、无自定义头、无 dictID）
+//     —— 用 `fzstd`（纯 JS、已是本仓库依赖）解压，避免依赖 Node 内置 zstd 的版本下限。
+//   · `parent_id` 非空 = 子代理线程（上游 UI/ThreadStore 都过滤这些行）→ 本模块同样跳过。
+//   · 解压后是 `SerializedThread`（DbThread + version = '0.3.0'）；version 缺失或不同 →
+//     上游走 legacy 升级分支，转换器两种方言都认。
+//   · `folder_paths` 是**工作区路径集合**（`\n` 连接 + `,` 索引还原顺序）→ 会话 cwd 取首项。
+//   · 时间只有行级 created_at/updated_at（RFC3339）；线程内消息没有时间戳。
+//
+// importZedFile/Directory 把库里每个线程独立落盘（sessionIds 过滤、库指纹短路径、逐线程
+// append），恒返回批量形态；标题钉成「Zed · 话题」与 cline/continue/goose 同款。
+import { Buffer } from 'node:buffer'
+import { decompress } from 'fzstd'
+import { convertZedJson, zedDataDir, zedThreadsDir, zedThreadsDbPath, zedFolderPaths } from '../convert/index.mjs'
+import { sessionSelection } from '../import-state.mjs'
+import { importMultiSource, convertSessionItems, previewSessionSet, selectionSet } from '../import-core.mjs'
+import { readOptionalDb, columnsOf, tableNames, locateDbInDirectory } from './sqlite.mjs'
+
+// 路径规则在 lib/convert/zed.mjs（纯函数）；这里转发给工具层。
+export { zedDataDir, zedThreadsDir, zedThreadsDbPath, zedFolderPaths }
+
+// 库签名 + 线程行（签名不符 → null；打不开 / 损坏 / 锁定由 readOptionalDb 归一为 null）。
+// 签名按上游事实：**只有 threads 一张表**且 data_type / data / summary 三列共存。
+function zedRows(db) {
+  const tables = tableNames(db)
+  if (tables.size !== 1 || !tables.has('threads')) return null
+  const cols = columnsOf(db, 'threads')
+  if (!cols.has('id') || !cols.has('summary') || !cols.has('data_type') || !cols.has('data')) return null
+  const rows = db.prepare('SELECT * FROM threads').all()
+    .filter((row) => typeof row.id === 'string' && row.id
+      // 子代理线程（parent_id 非空）不单独成会话，与上游 UI 过滤一致
+      && !(cols.has('parent_id') && row.parent_id))
+  return { cols, rows }
+}
+
+// 一行 → 线程对象（`data` 解压 + JSON.parse）。解压/解析失败返回 null（调用方跳过并计数）。
+function decodeThreadRow(row) {
+  const dataType = String(row.data_type || '').toLowerCase()
+  let text
+  try {
+    if (dataType === 'zstd') {
+      const bytes = row.data instanceof Uint8Array ? row.data : new Uint8Array(row.data)
+      text = Buffer.from(decompress(bytes)).toString('utf8')
+    } else if (dataType === 'json') {
+      text = typeof row.data === 'string' ? row.data : Buffer.from(row.data).toString('utf8')
+    } else {
+      // 上游遇到未知 data_type 会直接报错（bail!）→ 这里同样拒绝，不猜格式
+      return null
+    }
+  } catch {
+    // 压缩帧损坏 / 非 UTF-8：跳过该线程（绝不半读）
+    return null
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+/** Zed 线程库 → 线程摘要数组（发现层用，不解压 blob）。非 Zed 库/读不到 → null。 */
+export function readZedThreads(dbPath) {
+  return readOptionalDb(dbPath, zedRows, (_db, read) => {
+    const out = []
+    for (const row of read.rows) {
+      const folderPaths = read.cols.has('folder_paths') ? row.folder_paths : null
+      const folderOrder = read.cols.has('folder_paths_order') ? row.folder_paths_order : null
+      const paths = zedFolderPaths(folderPaths, folderOrder)
+      out.push({
+        id: row.id,
+        title: typeof row.summary === 'string' ? row.summary : '',
+        cwd: paths.length > 0 ? paths[0] : null,
+        folderPaths: paths,
+        createdAt: read.cols.has('created_at') ? row.created_at : null,
+        updatedAt: typeof row.updated_at === 'string' ? row.updated_at : null,
+      })
+    }
+    return out
+  })
+}
+
+/** Zed 线程库 → 完整中间 JSON 数组（导入/预览用：解压 + 附行级元数据）。 */
+export function readZedDb(dbPath) {
+  return readOptionalDb(dbPath, zedRows, (_db, read) => {
+    const out = []
+    const failed = []
+    for (const row of read.rows) {
+      const thread = decodeThreadRow(row)
+      if (!thread) { failed.push(row.id); continue }
+      const paths = zedFolderPaths(
+        read.cols.has('folder_paths') ? row.folder_paths : null,
+        read.cols.has('folder_paths_order') ? row.folder_paths_order : null,
+      )
+      out.push({
+        ...thread,
+        // 行级元数据优先于 blob 内字段（同源；DB 列是查询依据）
+        id: row.id,
+        summary: typeof row.summary === 'string' && row.summary ? row.summary : thread.summary,
+        created_at: read.cols.has('created_at') && row.created_at ? row.created_at : thread.created_at,
+        updated_at: typeof row.updated_at === 'string' && row.updated_at ? row.updated_at : thread.updated_at,
+        folderPaths: paths,
+      })
+    }
+    return { threads: out, failed }
+  })
+}
+
+const NOT_ZED_DB = '不是 Zed 线程库（缺 threads 单表或 data_type/data/summary 列）: '
+
+function readZedDbOrThrow(path) {
+  const decoded = readZedDb(path)
+  if (!decoded) throw new Error(NOT_ZED_DB + path)
+  return decoded
+}
+
+// 逐线程转换参数：zedId 取线程 id，cwd 取线程的首个工作区路径。
+const zedConvertOne = (args, path) => (thread) => convertZedJson(JSON.stringify(thread), {
+  ...args,
+  zedId: thread.id,
+  cwd: thread.folderPaths && thread.folderPaths.length > 0 ? thread.folderPaths[0] : undefined,
+  sourcePath: path,
+})
+
+const noUserTurnsInThread = (thread) => 'no user turns (thread ' + thread.id + ')'
+// 解压 / 解析失败的线程显式上报，不静默少导
+const undecodable = (id) => 'undecodable thread payload (' + id + ')'
+
+/** 库里每个线程独立落盘（sessionIds 过滤 + 库指纹 / WAL 短路径 + 逐线程 append）。 */
+export async function importZedFile(ctx, target, args, { registryDir, persisted, fingerprintKeys = [] } = {}) {
+  const selection = sessionSelection(args)
+  return importMultiSource(ctx, target, args, {
+    registryDir, persisted, fingerprintKeys, sqlite: true, selection, importFormat: 'zed',
+    load: async (path) => {
+      const decoded = readZedDbOrThrow(path)
+      const converted = await convertSessionItems(ctx, decoded.threads, {
+        path, args, wanted: selectionSet(selection), sourceLabel: 'Zed',
+        convertOne: zedConvertOne(args, path), skipReason: noUserTurnsInThread,
+      })
+      for (const id of decoded.failed) converted.preSkipped.push({ path, status: 'skipped', reason: undecodable(id) })
+      return converted
+    },
+  })
+}
+
+// 目录里的库：`<dir>/threads.db` 或 `<dir>/threads/threads.db`
+const ZED_DB_CANDIDATES = [['threads.db'], ['threads', 'threads.db']]
+
+export async function importZedDirectory(ctx, dirTarget, args, options = {}) {
+  return importZedFile(ctx, await locateDbInDirectory(ctx, dirTarget, ZED_DB_CANDIDATES), args, options)
+}
+
+// ── dry-run 预览（与正式导入同源的只读重演：绕开 registry / decideMulti / 落盘，零副作用）──
+
+// zed 预览：threads.db 一库多线程；标题与落盘一样钉成「Zed · 话题」。
+export async function previewZedFile(ctx, target, args) {
+  const path = target.displayPath || ctx.fs.processPath(target)
+  const decoded = readZedDbOrThrow(path)
+  const results = previewSessionSet(decoded.threads, {
+    path, args, wanted: selectionSet(sessionSelection(args)), sourceLabel: 'Zed',
+    convertOne: zedConvertOne(args, path), skipReason: noUserTurnsInThread,
+  })
+  for (const id of decoded.failed) results.push({ path, skipped: 1, skipReason: undecodable(id) })
+  return { total: decoded.threads.length, results }
+}
+
+export async function previewZedDirectory(ctx, dirTarget, args) {
+  return previewZedFile(ctx, await locateDbInDirectory(ctx, dirTarget, ZED_DB_CANDIDATES), args)
+}

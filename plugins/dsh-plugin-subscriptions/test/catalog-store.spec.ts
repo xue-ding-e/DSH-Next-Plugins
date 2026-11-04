@@ -1,0 +1,212 @@
+/**
+ * The durable model-catalog store: per-provider round-trips over one file,
+ * tolerance for missing/corrupt files, and strict snapshot validation (a
+ * malformed persisted entry must read as absent, never flow into
+ * resolveModel).
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { accountCatalogStore, catalogStore, sanitizeSnapshot } from '../src/providers/catalog-store.js'
+
+async function tempStorePath(): Promise<string> {
+  return join(await mkdtemp(join(tmpdir(), 'dsh-models-')), 'models.json')
+}
+
+test('catalog store round-trips per-provider snapshots in one file', async () => {
+  const path = await tempStorePath()
+  const grok = catalogStore('grok', path)
+  const codex = catalogStore('codex', path)
+  await grok.save({
+    at: 123,
+    models: [{
+      id: 'grok-4.6',
+      name: 'Grok 4.6',
+      contextWindow: 500_000,
+      reasoning: {
+        efforts: [{ id: ReasoningEffortId('high'), name: 'High Effort', description: 'extensive' }],
+        defaultEffort: ReasoningEffortId('high'),
+      },
+    }],
+  })
+  await codex.save({ at: 456, models: [{ id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex', maxContextWindow: 872000 }] })
+
+  const loaded = await grok.load()
+  assert.equal(loaded?.at, 123)
+  assert.equal(loaded?.models[0].reasoning?.defaultEffort, 'high')
+  assert.equal(loaded?.models[0].reasoning?.efforts[0].description, 'extensive')
+  assert.equal((await codex.load())?.models[0].name, 'GPT-5.2 Codex')
+  assert.equal((await codex.load())?.models[0].maxContextWindow, 872000)
+
+  // Clearing one provider keeps the other.
+  await grok.clear()
+  assert.equal(await grok.load(), undefined)
+  assert.equal((await codex.load())?.at, 456)
+  // The file itself stays valid JSON (parse throws otherwise).
+  JSON.parse(await readFile(path, 'utf8'))
+})
+
+test('catalog store round-trips output token limits', async () => {
+  const path = await tempStorePath()
+  const snapshot = {
+    at: 123,
+    models: [
+      { id: 'g', name: 'G', maxOutputTokens: 32_768 },
+      { id: 'min', name: 'Minimum', maxOutputTokens: 1 },
+      { id: 'max', name: 'Maximum', maxOutputTokens: Number.MAX_SAFE_INTEGER },
+    ],
+  }
+  await catalogStore('grok', path).save(snapshot)
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')).grok, snapshot)
+  assert.deepEqual(await catalogStore('grok', path).load(), snapshot)
+})
+
+test('catalog store accepts old caches without output token limits', async () => {
+  const path = await tempStorePath()
+  const snapshot = { at: 123, models: [{ id: 'g', name: 'G', contextWindow: 500_000 }] }
+  await writeFile(path, JSON.stringify({ grok: snapshot }))
+  const loaded = await catalogStore('grok', path).load()
+  assert.deepEqual(loaded, snapshot)
+  assert.equal(Object.hasOwn(loaded!.models[0], 'maxOutputTokens'), false)
+})
+
+test('sanitizeSnapshot rejects invalid output token limits', () => {
+  for (const maxOutputTokens of [
+    0, -1, 1.5, '32768', null, Number.MAX_SAFE_INTEGER + 1,
+    NaN, Infinity, -Infinity, true, {}, [],
+  ]) {
+    assert.equal(sanitizeSnapshot({
+      at: 123,
+      models: [
+        { id: 'valid', name: 'Valid' },
+        { id: 'invalid', name: 'Invalid', maxOutputTokens },
+      ],
+    }), undefined, `Invalid maxOutputTokens: ${String(maxOutputTokens)}`)
+  }
+})
+
+test('catalog store tolerates missing and corrupt files', async () => {
+  const path = await tempStorePath()
+  const store = catalogStore('grok', path)
+  // Missing file reads as absent; clear on a missing file is a no-op.
+  assert.equal(await store.load(), undefined)
+  await store.clear()
+  // Corrupt JSON reads as absent instead of throwing.
+  await writeFile(path, 'not json')
+  assert.equal(await store.load(), undefined)
+  // A corrupt file is still writable: save rebuilds it from scratch.
+  await store.save({ at: 2, models: [{ id: 'g', name: 'G' }] })
+  assert.equal((await store.load())?.at, 2)
+})
+
+test('sanitizeSnapshot drops malformed snapshots wholesale', () => {
+  const model = { id: 'g', name: 'G' }
+  const efforts = [{ id: 'high', name: 'High' }]
+  // A valid snapshot passes through.
+  assert.notEqual(sanitizeSnapshot({ at: 1, models: [model] }), undefined)
+  assert.notEqual(
+    sanitizeSnapshot({ at: 1, models: [{ ...model, reasoning: { efforts, defaultEffort: 'high' } }] }),
+    undefined,
+  )
+  // The codex fast-tier flag round-trips; a non-boolean one drops the snapshot.
+  assert.equal(
+    sanitizeSnapshot({ at: 1, models: [{ ...model, fastTier: true }] })?.models[0].fastTier,
+    true,
+  )
+  assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, fastTier: 'yes' }] }), undefined)
+  // Copilot per-model modalities round-trip; malformed ones drop the snapshot.
+  assert.deepEqual(
+    sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: ['text', 'image'] }] })?.models[0].inputModalities,
+    ['text', 'image'],
+  )
+  assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: [] }] }), undefined)
+  assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, inputModalities: ['video'] }] }), undefined)
+  // The Copilot wire choice and dual-protocol flag round-trip (a snapshot
+  // losing them would route every restarted model to the chat wire); a
+  // malformed value drops the snapshot.
+  const copilot = sanitizeSnapshot({
+    at: 1,
+    models: [{ ...model, copilotWire: 'responses', copilotResponses: true }],
+  })?.models[0]
+  assert.equal(copilot?.copilotWire, 'responses')
+  assert.equal(copilot?.copilotResponses, true)
+  assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, copilotWire: 'grpc' }] }), undefined)
+  assert.equal(sanitizeSnapshot({ at: 1, models: [{ ...model, copilotResponses: 'yes' }] }), undefined)
+  for (const malformed of [
+    undefined,
+    null,
+    'text',
+    { at: 'soon', models: [model] },
+    { at: 1, models: [] },
+    { at: 1, models: [{ id: '', name: 'G' }] },
+    { at: 1, models: [{ id: 'g', name: '' }] },
+    { at: 1, models: [model, model] }, // duplicate ids
+    { at: 1, models: [{ ...model, contextWindow: -5 }] },
+    { at: 1, models: [{ ...model, description: 42 }] },
+    { at: 1, models: [{ ...model, reasoning: { efforts: [] } }] },
+    { at: 1, models: [{ ...model, reasoning: { efforts: [{ id: 'high', name: '' }] } }] },
+    { at: 1, models: [{ ...model, reasoning: { efforts: [{ id: '', name: 'High' }] } }] },
+    { at: 1, models: [{ ...model, reasoning: { efforts, defaultEffort: 'unknown' } }] },
+    { at: 1, models: [{ ...model, reasoning: { efforts: [...efforts, ...efforts] } }] }, // duplicate efforts
+  ]) {
+    assert.equal(sanitizeSnapshot(malformed), undefined, JSON.stringify(malformed))
+  }
+})
+
+test('account catalog store keeps per-account snapshots apart from the provider entry', async () => {
+  const path = await tempStorePath()
+  const provider = catalogStore('codex', path)
+  const key = '["379d","user","user-m09"]'
+  const account = accountCatalogStore('codex', key, path)
+  const other = accountCatalogStore('codex', 'other', path)
+  await provider.save({ at: 1, models: [{ id: 'gpt-5.1', name: 'GPT-5.1' }] })
+  await account.save({ at: 2, models: [{ id: 'gpt-6-astra', name: 'GPT-6 Astra', priority: 1 }] })
+  await other.save({ at: 3, models: [{ id: 'gpt-5.5', name: 'GPT-5.5' }] })
+
+  assert.deepEqual((await provider.load())?.models.map(model => model.id), ['gpt-5.1'])
+  assert.deepEqual((await account.load())?.models.map(model => model.id), ['gpt-6-astra'])
+  assert.deepEqual((await other.load())?.models.map(model => model.id), ['gpt-5.5'])
+  assert.equal(await accountCatalogStore('grok', key, path).load(), undefined)
+
+  await account.clear()
+  assert.equal(await account.load(), undefined)
+  assert.deepEqual((await other.load())?.models.map(model => model.id), ['gpt-5.5'], 'clearing one account keeps its siblings')
+  assert.deepEqual((await provider.load())?.models.map(model => model.id), ['gpt-5.1'])
+  await provider.clear()
+  assert.deepEqual((await other.load())?.models.map(model => model.id), ['gpt-5.5'], 'clearing the provider entry keeps account snapshots')
+})
+
+test('concurrent provider and account saves on one file never lose a sibling snapshot (issue #129)', async () => {
+  // A cold boot discovers every account's catalog in parallel; with whole-file
+  // read-modify-write the saves used to race (last writer wins, dropping the
+  // `accounts` section). Writes are serialized per path, so every entry lands.
+  const snapshot = { at: 1, models: [{ id: 'gpt-x', name: 'GPT X' }] }
+  const accounts = ['acc1', 'acc2', 'acc3', 'acc4', 'acc5']
+  for (let round = 0; round < 10; round++) {
+    const path = await tempStorePath()
+    await writeFile(path, JSON.stringify({ codex: snapshot, accounts: { codex: { seed: snapshot } } }))
+    await Promise.all([
+      catalogStore('codex', path).save(snapshot),
+      ...accounts.map(account => accountCatalogStore('codex', account, path).save(snapshot)),
+    ])
+    const file = JSON.parse(await readFile(path, 'utf8')) as { codex: unknown; accounts: { codex: Record<string, unknown> } }
+    assert.notEqual(file.codex, undefined)
+    assert.deepEqual(Object.keys(file.accounts.codex).sort(), ['seed', ...accounts].sort(), `round ${round}`)
+  }
+})
+
+test('account catalog store treats a malformed accounts section as absent', async () => {
+  const path = await tempStorePath()
+  await writeFile(path, JSON.stringify({ codex: { at: 1, models: [{ id: 'a', name: 'A' }] }, accounts: [] }))
+  const account = accountCatalogStore('codex', 'x', path)
+  assert.equal(await account.load(), undefined)
+  await account.clear()
+  await account.save({ at: 2, models: [{ id: 'b', name: 'B' }] })
+  const file = JSON.parse(await readFile(path, 'utf8')) as { codex: unknown; accounts: { codex: Record<string, unknown> } }
+  assert.deepEqual(Object.keys(file.accounts.codex), ['x'])
+  assert.notEqual(file.codex, undefined, 'the provider entry survives the rewrite')
+})

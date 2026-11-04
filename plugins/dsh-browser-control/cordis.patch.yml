@@ -1,0 +1,21 @@
+# dsh-browser-control bundle patch.
+#
+# The bundle inserts the row enabled; `enabled: false` in the row's own config
+# is what keeps the tools off the model surface, because the Host half returns
+# before registering anything. That keeps the "off by default" contract without
+# leaving an inactive Loader entry behind.
+#
+# To turn it on, override this row in your profile's cordis.patch.yml:
+#
+#   - id: browser-control
+#     name: dsh-browser-control
+#     config:
+#       enabled: true
+#
+# A patch override replaces the whole `config` object, so restate any field you
+# still want (timeoutMs, allowPrivateHosts).
+- insert:
+    - id: browser-control
+      name: dsh-browser-control
+      config:
+        enabled: true

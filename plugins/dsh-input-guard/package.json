@@ -1,0 +1,41 @@
+{
+  "name": "dsh-input-guard",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Shows a persistent, stoppable banner whenever an agent drives your real mouse and keyboard, so input synthesis is never silent.",
+  "license": "Apache-2.0",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": false,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "dshNextModificationNotice": "Modified 2026-11-05: moved the existing DSH version requirement to engines.dsh without changing its range."
+}

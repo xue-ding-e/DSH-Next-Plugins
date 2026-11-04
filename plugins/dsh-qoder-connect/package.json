@@ -1,0 +1,49 @@
+{
+  "name": "dsh-qoder-connect",
+  "displayName": "DSH Qoder Connect (CN)",
+  "description": "把 Qoder CN（qoder.com.cn）订阅里的模型以 OpenAI 兼容渠道接进 DeepSeek Harness。凭据走官方 PAT（pt- 前缀），插件自己换 jobToken、自己刷模型目录，不碰桌面 App 的加密凭据。",
+  "version": "0.6.1",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "qoder",
+    "model-provider"
+  ],
+  "type": "module",
+  "scripts": {
+    "test": "node --import ./tests/host-runtime.mjs --test tests/*.test.mjs"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client.js",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5 || ~4.1.0",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.3 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.3 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.1-rc.3 || 0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "~3.18.5 || ~3.19.0",
+    "@earendil-works/pi-ai": "^1.1.0"
+  }
+}

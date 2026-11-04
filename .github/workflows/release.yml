@@ -1,0 +1,56 @@
+name: Prepare plugin release
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile_ref:
+        description: Profile commit or tag containing the exact archive locks
+        required: true
+        default: main
+      release_tag:
+        description: Target plugin release tag
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          path: plugin-sources
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: xue-ding-e/DSH-Next-Profile
+          ref: ${{ inputs.profile_ref }}
+          path: installer-tools
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26.13.0'
+          package-manager-cache: false
+      - name: Test browser and explicit BSK binding
+        shell: pwsh
+        run: |
+          node --test plugin-sources/plugins/dsh-browser-control/tests/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test plugin-sources/plugins/dsh-bsk-bridge/tests/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Pack and verify frozen locks
+        env:
+          PLUGIN_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node installer-tools/scripts/pack-plugins.mjs --sources plugin-sources --manifest installer-tools/profile/manifest.json --output .output/plugins --tag "$env:PLUGIN_RELEASE_TAG"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: plugin-release-candidate
+          if-no-files-found: error
+          path: |
+            .output/plugins/artifacts/*.tgz
+            .output/plugins/SHA256SUMS
+            .output/plugins/manifest.json
+            plugin-sources/compatibility.json

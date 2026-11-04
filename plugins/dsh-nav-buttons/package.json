@@ -1,0 +1,44 @@
+{
+  "name": "dsh-nav-buttons",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Mouse side buttons (X1/X2) and Alt+Arrow walk one unified back/forward history across sessions, panels and sidebar tabs — while the sidebar browser page keeps its own page history inside its own view.",
+  "license": "Apache-2.0",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": false,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-api-workspace-controller"
+      ]
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "dshNextModificationNotice": "Modified 2026-11-05: moved the existing DSH version requirement to engines.dsh without changing its range."
+}

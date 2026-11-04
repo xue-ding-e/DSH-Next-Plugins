@@ -1,0 +1,8 @@
+# dsh-whale-boot bundle patch: inserts the boot-intro row into the profile roster.
+#
+# The row is a bare plugin by package name; the host half (exports ".") owns
+# both the asset route and the index injection, so there is no browser half and
+# no ModuleLoader dependency.
+- insert:
+    - id: whale-boot
+      name: dsh-whale-boot

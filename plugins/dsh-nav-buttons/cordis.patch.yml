@@ -1,0 +1,9 @@
+# dsh-nav-buttons bundle patch: inserts the navigation-buttons row.
+#
+# The plugin is browser-only (no host half), so this row exists only to put the
+# package in the profile roster that the client module graph is composed from.
+- insert:
+    - id: nav-buttons
+      name: dsh-nav-buttons
+      config:
+        enabled: true

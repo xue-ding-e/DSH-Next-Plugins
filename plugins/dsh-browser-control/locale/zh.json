@@ -1,0 +1,7 @@
+{
+  "_modificationNotice": "Modified 2026-11-05: removed the unavailable screenshot claim.",
+  "meta": {
+    "title": "浏览器操控",
+    "description": "让模型直接操作内置浏览器 tab：导航、快照、点击、填表、读文本，复用该 tab 已登录的 Cookie 与登录态。"
+  }
+}

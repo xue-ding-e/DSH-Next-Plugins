@@ -1,0 +1,6 @@
+# dsh-input-guard bundle patch: inserts the input-consent banner row.
+- insert:
+    - id: input-guard
+      name: dsh-input-guard
+      config:
+        enabled: true

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Retry timing",
+    "description": "Tune the wait before each model-request retry in Settings: delay, ceiling, jitter, and how a provider-disclosed reset is honored."
+  }
+}

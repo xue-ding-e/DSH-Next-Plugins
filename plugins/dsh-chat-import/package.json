@@ -1,0 +1,132 @@
+{
+  "name": "dsh-chat-import",
+  "description": "Import conversation history from 25+ AI coding agents into DeepSeek Harness as resumable sessions — tool calls, reasoning and results kept intact, with reverse export. | 把 25+ AI 编程 Agent 的聊天记录导入 DeepSeek Harness 继续对话，保留工具调用、推理与结果，支持反向导出。",
+  "version": "0.26.4-fix.2",
+  "type": "module",
+  "main": "./lib/index.mjs",
+  "types": "./lib/index.d.ts",
+  "icon": "assets/import.svg",
+  "bin": {
+    "dsh-chat-import": "bin/dsh-chat-import.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.mjs"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./export.mjs": "./lib/export/index.mjs",
+    "./CHANGELOG.md": "./CHANGELOG.md",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.mjs",
+    "lib/*.js",
+    "lib/index.d.ts",
+    "lib/convert",
+    "lib/discovery",
+    "lib/export",
+    "lib/sources",
+    "lib/tools",
+    "bin",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "docs/*.md",
+    "docs/*.png",
+    "CHANGELOG.md",
+    "assets/import.svg",
+    "assets/dci-promo.png",
+    "assets/agents",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh": ">=0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <0.3.0",
+    "@deepseek-ai/schemastery": ">=3.0.0",
+    "react": ">=18.0.0"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh",
+    "claude-code",
+    "codex",
+    "chatgpt",
+    "cursor",
+    "gemini",
+    "antigravity",
+    "reasonix",
+    "pi-coding-agent",
+    "opencode",
+    "zcode",
+    "grokbuild",
+    "openclaw",
+    "hermes",
+    "kimi",
+    "kimi-cli",
+    "qoder",
+    "qoder-cli",
+    "workbuddy",
+    "trae",
+    "trae-work",
+    "sqlite",
+    "import",
+    "jsonl",
+    "migration",
+    "transcript"
+  ],
+  "author": "Nwflower <1679659@qq.com>",
+  "homepage": "https://github.com/Nwflower/dsh-chat-import",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nwflower/dsh-chat-import.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Nwflower/dsh-chat-import/issues"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "coverage": "node --test --test-reporter=spec --experimental-test-coverage --test-coverage-lines=75 \"test/*.test.mjs\"",
+    "check:coverage": "npm run coverage | node .github/scripts/check-coverage.mjs",
+    "lint": "eslint .",
+    "check:linux": "node .github/scripts/check-linux-compat.mjs",
+    "check:leaks": "node .github/scripts/check-leaks.mjs",
+    "check:links": "node .github/scripts/check-doc-links.mjs",
+    "check:tests": "node .github/scripts/check-test-discipline.mjs",
+    "release:notes": "node scripts/release-notes.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "build": "node scripts/build-client.mjs --check && node .github/scripts/build-check.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test && git diff --quiet && git diff --cached --quiet && npm pack --dry-run"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "eslint": "^10.8.1"
+  },
+  "dependencies": {
+    "fzstd": "^0.1.1"
+  },
+  "overrides": {
+    "js-yaml": "4.3.2"
+  }
+}
