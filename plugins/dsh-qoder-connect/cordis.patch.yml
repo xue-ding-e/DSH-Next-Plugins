@@ -29,6 +29,14 @@
 #     name: dsh-qoder-connect
 #     config:
 #       cosyVersion: "1.1.75-hotfix.1"   # 覆盖客户端版本（服务端按它裁剪模型目录）
+#       # 复用 Magpie Settings → Privacy 下载的本地 privacy-filter 模型。
+#       # 默认关闭；启用后找不到 GGUF/pf-serve 或分类失败会阻止请求发给 Qoder。
+#       privacyFilter:
+#         enabled: true
+#         # 默认脱敏 HTTP(S) 链接，调用工具前在本地恢复。
+#         # preserveUrls: true 会把链接原样发给 Qoder，包括查询参数。
+#         # cacheDir: "C:/Users/<user>/.cache/magpie/privacy-filter"
+#         # modelPath / executablePath 只在 Magpie 使用非默认缓存位置时填写。
 - insert:
     - id: llm-qoder
       name: dsh-qoder-connect

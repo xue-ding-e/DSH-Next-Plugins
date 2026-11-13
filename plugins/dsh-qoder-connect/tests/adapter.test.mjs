@@ -3,7 +3,8 @@ import { test } from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 import LlmRuntime, { BlockAssembler, createUserMessage, resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
 import { Config, createQoderAdapter } from "../lib/index.js";
-import { createQoderClient, createQoderShim } from "../lib/protocol.js";
+import { createQoderClient, createQoderShim, qoderDecodeBody } from "../lib/protocol.js";
+import { createPrivacyFilter } from "../lib/privacy-filter.js";
 
 const catalog = {
   current: () => [{ id: "dfmodel", name: "test model", contextWindow: 180000, maxTokens: 1024 }],
@@ -93,4 +94,61 @@ test("batched Qoder arguments survive the real shim, pi-ai and DSH adapter", asy
   })) assembler.push(chunk);
   assert.deepEqual(assembler.blocks(), [{ type: "tool-call", id: "call_1", name: "pwsh", arguments: json }]);
   assert.deepEqual(assembler.finish, { kind: "tool-calls" });
+});
+
+test("DSH receives the URL restored from Qoder, and unknown markers cannot execute tools", async t => {
+  const url = "https://example.test/synthetic?q=private-probe";
+  const frame = (delta, finish_reason = null) => `data: ${JSON.stringify({
+    statusCodeValue: 200,
+    body: JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] }),
+  })}\n\n`;
+  let returnedUrl;
+  let maskConfirmed = false;
+  const realFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (endpoint, init) => {
+    if (!String(endpoint).startsWith("https://qoder.test/")) return realFetch(endpoint, init);
+    const wire = qoderDecodeBody(Buffer.from(init.body)).toString("utf8");
+    const marker = JSON.parse(wire).messages.at(-1).content;
+    maskConfirmed = !wire.includes(url) && /^https:\/\/magpie-url-[0-9a-f]{16}\.invalid\/$/u.test(marker);
+    const json = JSON.stringify({ url: returnedUrl?.(marker) ?? marker }).replaceAll("/", "\\/");
+    return Promise.resolve(new Response(
+      frame({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "web_fetch", arguments: json.slice(0, 10) } }] })
+      + frame({ tool_calls: [{ index: 0, function: { arguments: json.slice(10) } }] })
+      + frame({}, "tool_calls") + "data: [DONE]\n\n",
+    ));
+  });
+  const privacy = createPrivacyFilter({ enabled: true });
+  t.after(() => privacy.close());
+  const client = createQoderClient({
+    config: () => ({ gateway: "https://qoder.test" }),
+    tokens: { get: async () => ({ userID: "test-user", authToken: "test-token", machineID: "test-machine" }) },
+    privacy: {
+      maskBody: () => privacy.maskBody({ messages: [{ role: "user", content: url }] }),
+    },
+  });
+  const shim = createQoderShim({ client, catalog });
+  t.after(() => shim.close());
+  await shim.ready;
+  const { adapter } = createQoderAdapter({ shim, catalog, config: {}, ctx: { get: () => undefined } });
+  async function run() {
+    const assembler = new BlockAssembler();
+    for await (const chunk of adapter.stream({
+      provider: "qoder1", model: "dfmodel",
+      messages: [createUserMessage({ content: [{ type: "text", text: url }], source: { kind: "user" } })],
+    })) assembler.push(chunk);
+    return assembler;
+  }
+  const restored = await run();
+  assert.equal(maskConfirmed, true);
+  assert.deepEqual(restored.blocks(), [{ type: "tool-call", id: "call_1", name: "web_fetch", arguments: JSON.stringify({ url }) }]);
+  assert.deepEqual(restored.finish, { kind: "tool-calls" });
+  for (const override of [
+    () => "https://magpie-url-ffffffffffffffff.invalid/",
+    marker => `${marker}different-path`,
+  ]) {
+    returnedUrl = override;
+    const blocked = await run();
+    assert.deepEqual(blocked.blocks(), []);
+    assert.equal(blocked.finish.kind, "error");
+  }
 });

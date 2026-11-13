@@ -59,6 +59,18 @@ const POLL_FIELD = z.number().description("凭据/目录巡检间隔（毫秒）
 const CONTEXT_WINDOW_OVERRIDES_FIELD = z.dict(z.number())
   .description("按模型覆盖上下文窗口（如 { dfmodel: 1000000 }）；仅在你明确知道上游能吃更多时使用");
 
+const PRIVACY_FILTER_FIELD = z.object({
+  enabled: z.boolean(),
+  preserveUrls: z.boolean().description("将 HTTP(S) 链接原样发送给 Qoder，包括查询参数。默认脱敏并在本地恢复。"),
+  cacheDir: z.string(),
+  modelPath: z.string(),
+  executablePath: z.string(),
+  threshold: z.number(),
+  startupTimeoutMs: z.number(),
+  requestTimeoutMs: z.number(),
+  chunkBytes: z.number(),
+}).description("通过 Magpie 本地 privacy-filter/ pf-serve 在 Qoder 请求发出前脱敏；启用后资产缺失或分类失败会阻止请求");
+
 export const Config = z.object({
   patFile: PAT_FILE_FIELD,
   gateway: GATEWAY_FIELD,
@@ -68,6 +80,7 @@ export const Config = z.object({
   cosyVersion: COSY_VERSION_FIELD,
   pollIntervalMs: POLL_FIELD,
   contextWindowOverrides: CONTEXT_WINDOW_OVERRIDES_FIELD,
+  privacyFilter: PRIVACY_FILTER_FIELD,
   retryPolicy: RetryPolicySchema,
 });
 

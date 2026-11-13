@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 
 import { compareVersion, diffAgainstOfficial, readOfficialCatalog, requiredCliVersion } from "./official-cache.js";
+import { createPrivacyFilter, hasPrivacyPlaceholder } from "./privacy-filter.js";
 
 /**
  * 协议层自己解析 DSH home。
@@ -1201,12 +1202,18 @@ export function unwrapQoderEvent(raw) {
 function deltaOf(chunk) {
   const choice = Array.isArray(chunk?.choices) ? chunk.choices[0] : undefined;
   const delta = choice?.delta;
-  if (delta === null || typeof delta !== "object") return undefined;
+  const message = choice?.message;
+  if ((delta === null || typeof delta !== "object") && (message === null || typeof message !== "object")) return undefined;
   const out = {};
-  if (typeof delta.content === "string" && delta.content.length > 0) out.content = delta.content;
+  if (typeof delta?.content === "string" && delta.content.length > 0) out.content = delta.content;
   // Qoder 的思考链字段就叫 reasoning_content（与 DeepSeek 一致）。
-  if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) out.reasoning_content = delta.reasoning_content;
-  if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) out.tool_calls = delta.tool_calls;
+  if (typeof delta?.reasoning_content === "string" && delta.reasoning_content.length > 0) out.reasoning_content = delta.reasoning_content;
+  if (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0) {
+    out.tool_calls = delta.tool_calls;
+  } else if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+    // 完整消息中的工具调用使用同一条参数恢复路径。
+    out.tool_calls = message.tool_calls;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -1359,12 +1366,30 @@ export function buildChatBody(options) {
  */
 export function createQoderClient(options) {
   const { tokens, logger, config } = options;
+  const injectedPrivacy = options.privacy;
+  const privacyInstances = new Set();
+  let currentPrivacy;
+  let currentPrivacyConfig = "";
   const gateway = () => String(config()?.gateway ?? DEFAULT_GATEWAY).replace(/\/+$/, "");
   const chatPath = () => {
     const value = config()?.chatPath;
     return typeof value === "string" && value.length > 0 ? value : DEFAULT_CHAT_PATH;
   };
   const chatUrl = () => `${gateway()}${chatPath()}`;
+
+  function privacyOf() {
+    if (injectedPrivacy !== undefined) return injectedPrivacy;
+    const privacyConfig = config()?.privacyFilter ?? {};
+    const serialized = JSON.stringify(privacyConfig);
+    if (currentPrivacy !== undefined && serialized === currentPrivacyConfig) return currentPrivacy;
+    const next = createPrivacyFilter(privacyConfig, { spawn: options.spawnPrivacyFilter });
+    const previous = currentPrivacy;
+    currentPrivacy = next;
+    currentPrivacyConfig = serialized;
+    privacyInstances.add(next);
+    if (previous !== undefined) void previous.close();
+    return next;
+  }
 
   /**
    * 发一次流式请求。
@@ -1392,21 +1417,29 @@ export function createQoderClient(options) {
   async function chatStreamOnce(request, signal) {
     const credential = await tokens.get();
     const url = chatUrl();
-    const body = buildChatBody({
-      modelKey: request.model,
-      messages: request.messages,
-      isReasoning: request.isReasoning,
-      reasoningEffort: request.reasoningEffort,
-      maxTokens: request.maxTokens,
-      tools: request.tools,
-      toolChoice: request.toolChoice,
-      temperature: request.temperature,
-      sessionId: request.sessionId,
-      sessionType: config()?.sessionType,
-    });
+    const privacy = privacyOf();
+    let prepared;
+    try {
+      prepared = await privacy.maskBody(buildChatBody({
+        modelKey: request.model,
+        messages: request.messages,
+        isReasoning: request.isReasoning,
+        reasoningEffort: request.reasoningEffort,
+        maxTokens: request.maxTokens,
+        tools: request.tools,
+        toolChoice: request.toolChoice,
+        temperature: request.temperature,
+        sessionId: request.sessionId,
+        sessionType: config()?.sessionType,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger?.warn?.(`dsh-qoder-connect: Magpie 脱敏失败，已阻止 Qoder 请求 — ${message}`);
+      return { ok: false, status: 503, kind: "privacy", message };
+    }
 
     // 只有要发出去的字节才参与签名 —— 顺序不能反。
-    const encoded = qoderEncodeBody(Buffer.from(JSON.stringify(body), "utf8"));
+    const encoded = qoderEncodeBody(Buffer.from(JSON.stringify(prepared.body), "utf8"));
     let response;
     try {
       response = await fetch(url, {
@@ -1469,7 +1502,7 @@ export function createQoderClient(options) {
     }
     if (first.kind === "error") return { ok: false, status: 502, kind: "upstream", message: first.message };
     if (first.kind === "done") return { ok: false, status: 502, kind: "empty", message: "Qoder 只回了一个结束标记，没有正文" };
-    return { ok: true, response: translate(reader, parser, leftoverEvents, first, request, signal) };
+    return { ok: true, response: translate(reader, parser, leftoverEvents, first, request, signal, prepared) };
   }
 
   /** 这一帧 delta 里到底有没有「内容」（正文 / 思考链 / 工具调用）。 */
@@ -1493,7 +1526,7 @@ function chunkHasFinish(chunk) {
 }
 
 /** 把 Qoder 事件流翻译成 OpenAI SSE，沿用首帧预读的解析状态和剩余事件。 */
-  function translate(reader, parser, leftoverEvents, firstChunk, request, signal) {
+  function translate(reader, parser, leftoverEvents, firstChunk, request, signal, prepared) {
     const model = request.model;
     const id = `chatcmpl-qoder-${randomBytes(8).toString("hex")}`;
     const created = Math.floor(Date.now() / 1000);
@@ -1501,6 +1534,51 @@ function chunkHasFinish(chunk) {
     // 延用预读的解析器，保留半帧文本和跨网络块的 UTF-8 解码状态。
     let usage;
     let finished = false;
+    const responseRestorer = prepared.createResponseRestorer?.();
+    const calls = new Map();
+
+    function restoreDelta(delta) {
+      if (delta === undefined || responseRestorer === undefined) return delta;
+      const { tool_calls, ...out } = delta;
+      for (const key of ["content", "reasoning_content"]) {
+        if (typeof out[key] === "string") out[key] = responseRestorer.restore(key, out[key]);
+      }
+      // Wait for complete JSON so escaping and unresolved markers are checked
+      // before DSH receives any of the calls.
+      for (const [position, call] of (tool_calls ?? []).entries()) {
+        const index = call.index ?? position;
+        const prior = calls.get(index);
+        calls.set(index, {
+          ...prior,
+          ...call,
+          index,
+          function: {
+            ...prior?.function,
+            ...call.function,
+            arguments: (prior?.function.arguments ?? "") + (call.function?.arguments ?? ""),
+          },
+        });
+      }
+      return out;
+    }
+
+    function restoredCalls() {
+      return [...calls.values()].map((call) => {
+        const original = call.function.arguments || "{}";
+        let changed = false;
+        const args = JSON.parse(original, (_key, value) => {
+          if (typeof value !== "string") return value;
+          const restored = prepared.restoreArgument(value);
+          if (hasPrivacyPlaceholder(restored)) throw new Error("Unresolved Magpie placeholder");
+          changed ||= value !== restored;
+          return restored;
+        });
+        if (args === null || typeof args !== "object" || Array.isArray(args) || hasPrivacyPlaceholder(JSON.stringify(args))) {
+          throw new Error("Invalid tool arguments after Magpie restoration");
+        }
+        return { ...call, function: { ...call.function, arguments: changed ? JSON.stringify(args) : original } };
+      });
+    }
 
     const chunk = (delta, finishReason) => {
       const payload = {
@@ -1535,6 +1613,29 @@ function chunkHasFinish(chunk) {
           if (closed) return;
           try { controller.enqueue(bytes); } catch { closed = true; }
         };
+        const finish = (reason) => {
+          for (const [key, text] of responseRestorer?.flush() ?? []) {
+            if (text.length > 0) enqueue(chunk({ [key]: text }));
+          }
+          let toolCalls;
+          if (calls.size > 0 && ["stop", "tool_calls", "function_call"].includes(reason)) {
+            try {
+              toolCalls = restoredCalls();
+            } catch (error) {
+              logger?.warn?.("dsh-qoder-connect: Qoder 工具参数无效或含未还原的 Magpie 占位符，已阻止工具执行");
+              enqueue(encoder.encode(`data: ${JSON.stringify({ error: {
+                message: "Qoder 工具参数无效或含未还原的 Magpie 占位符。请使用原始值重试。",
+                code: "MAGPIE_TOOL_ARGUMENTS",
+              } })}\n\n`));
+              reason = "network_error";
+            }
+          }
+          finished = true;
+          if (toolCalls?.length > 0) enqueue(chunk({ tool_calls: toolCalls }));
+          enqueue(chunk({}, toolCalls?.length > 0 && reason === "stop" ? "tool_calls" : reason));
+          enqueue(encoder.encode("data: [DONE]\n\n"));
+          closeStream();
+        };
         const emit = (parsed) => {
           if (finished || closed) return;
           if (parsed.kind === "ignore") return;
@@ -1543,25 +1644,17 @@ function chunkHasFinish(chunk) {
             return;
           }
           if (parsed.kind === "done") {
-            finished = true;
-            enqueue(chunk({}, "stop"));
-            enqueue(encoder.encode("data: [DONE]\n\n"));
-            closeStream();
+            finish("stop");
             return;
           }
           const inner = parsed.chunk;
           if (inner?.usage !== undefined && inner.usage !== null) usage = inner.usage;
           const choice = Array.isArray(inner?.choices) ? inner.choices[0] : undefined;
+          const delta = restoreDelta(deltaOf(inner));
+          if (delta !== undefined && Object.keys(delta).length > 0) enqueue(chunk(delta));
           if (choice?.finish_reason !== undefined && choice.finish_reason !== null) {
-            finished = true;
-            const delta = deltaOf(inner) ?? {};
-            enqueue(chunk(delta, choice.finish_reason));
-            enqueue(encoder.encode("data: [DONE]\n\n"));
-            closeStream();
-            return;
+            finish(choice.finish_reason);
           }
-          const delta = deltaOf(inner);
-          if (delta !== undefined) enqueue(chunk(delta));
         };
 
         const pump = async () => {
@@ -1575,17 +1668,13 @@ function chunkHasFinish(chunk) {
               for (const event of parser.push(value)) emit(unwrapQoderEvent(event.raw));
             }
             if (!finished) {
-              finished = true;
-              enqueue(chunk({}, "stop"));
-              enqueue(encoder.encode("data: [DONE]\n\n"));
+              finish(calls.size > 0 ? "network_error" : "stop");
             }
             closeStream();
           } catch (error) {
             logger?.warn?.(`dsh-qoder-connect: 上游流中断：${error instanceof Error ? error.message : String(error)}`);
             if (!finished) {
-              finished = true;
-              enqueue(chunk({}, "stop"));
-              enqueue(encoder.encode("data: [DONE]\n\n"));
+              finish(calls.size > 0 ? "network_error" : "stop");
             }
             closeStream();
           }
@@ -1601,7 +1690,14 @@ function chunkHasFinish(chunk) {
     });
   }
 
-  return { chatStream };
+  return {
+    chatStream,
+    async close() {
+      await Promise.allSettled([...privacyInstances].map((privacy) => privacy.close()));
+      privacyInstances.clear();
+      currentPrivacy = undefined;
+    },
+  };
 }
 
 //#endregion
@@ -1889,7 +1985,7 @@ export function createQoderShim(options) {
     }
 
     if (!result.ok) {
-      const status = result.kind === "auth" ? 401 : result.kind === "aborted" ? 499 : 502;
+      const status = result.kind === "auth" ? 401 : result.kind === "aborted" ? 499 : result.kind === "privacy" ? 503 : 502;
       writeOpenAIError(res, status, result.kind, `qoder upstream (http ${result.status}): ${result.message.slice(0, 500)}`);
       return;
     }
@@ -1928,15 +2024,20 @@ export function createQoderShim(options) {
     body.pipe(res);
   }
 
+  let closePromise;
   return {
     ready,
     baseUrl,
     token: () => SHARED_SECRET,
-    close: () => new Promise((resolve, reject) => {
-      server.close(() => resolve());
-      server.closeAllConnections();
-      server.once("error", reject);
-    }),
+    close: () => {
+      if (closePromise !== undefined) return closePromise;
+      closePromise = new Promise((resolve, reject) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+        server.once("error", reject);
+      }).then(() => client.close?.());
+      return closePromise;
+    },
   };
 }
 
