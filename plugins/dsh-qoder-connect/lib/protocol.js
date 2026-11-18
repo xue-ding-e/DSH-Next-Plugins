@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 
 import { compareVersion, diffAgainstOfficial, readOfficialCatalog, requiredCliVersion } from "./official-cache.js";
-import { createPrivacyFilter, hasPrivacyPlaceholder } from "./privacy-filter.js";
+import { createPrivacyFilter, hasPrivacyPlaceholder, PrivacyFilterError } from "./privacy-filter.js";
 
 /**
  * 协议层自己解析 DSH home。
@@ -1564,20 +1564,39 @@ function chunkHasFinish(chunk) {
 
     function restoredCalls() {
       return [...calls.values()].map((call) => {
-        const original = call.function.arguments || "{}";
-        let changed = false;
-        const args = JSON.parse(original, (_key, value) => {
-          if (typeof value !== "string") return value;
-          const restored = prepared.restoreArgument(value);
-          if (hasPrivacyPlaceholder(restored)) throw new Error("Unresolved Magpie placeholder");
-          changed ||= value !== restored;
-          return restored;
-        });
-        if (args === null || typeof args !== "object" || Array.isArray(args) || hasPrivacyPlaceholder(JSON.stringify(args))) {
-          throw new Error("Invalid tool arguments after Magpie restoration");
+        try {
+          return restoreCall(call);
+        } catch (error) {
+          if (!(error instanceof PrivacyFilterError) || typeof options.recoverToolArguments !== "function") throw error;
+          // Each rejected call retains its name and id. Only this call receives
+          // an error envelope; valid siblings still reach their tool bodies.
+          return { ...call, function: { ...call.function, arguments: options.recoverToolArguments(error) } };
         }
-        return { ...call, function: { ...call.function, arguments: changed ? JSON.stringify(args) : original } };
       });
+    }
+
+    function restoreCall(call) {
+      const original = call.function.arguments || "{}";
+      let parsed;
+      try {
+        parsed = JSON.parse(original);
+      } catch (error) {
+        throw new PrivacyFilterError("PRIVACY_FILTER_TOOL_JSON", "Qoder 返回的工具参数不是有效 JSON。此响应的工具调用已阻止，请重新生成。", error);
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new PrivacyFilterError("PRIVACY_FILTER_TOOL_JSON", "Qoder 返回的工具参数必须是 JSON 对象。此响应的工具调用已阻止，请重新生成。");
+      }
+      let changed = false;
+      const args = JSON.parse(original, (key, value) => {
+        if (hasPrivacyPlaceholder(key)) {
+          throw new PrivacyFilterError("PRIVACY_FILTER_UNKNOWN_PLACEHOLDER", "Qoder 将脱敏标记写入了工具参数名。此响应的工具调用已阻止，请重新生成。");
+        }
+        if (typeof value !== "string") return value;
+        const restored = prepared.restoreArgument(value);
+        changed ||= value !== restored;
+        return restored;
+      });
+      return { ...call, function: { ...call.function, arguments: changed ? JSON.stringify(args) : original } };
     }
 
     const chunk = (delta, finishReason) => {
@@ -1622,10 +1641,12 @@ function chunkHasFinish(chunk) {
             try {
               toolCalls = restoredCalls();
             } catch (error) {
-              logger?.warn?.("dsh-qoder-connect: Qoder 工具参数无效或含未还原的 Magpie 占位符，已阻止工具执行");
+              const code = error instanceof PrivacyFilterError ? error.code : "MAGPIE_TOOL_ARGUMENTS";
+              const message = error instanceof PrivacyFilterError ? error.message : "Qoder 工具参数还原失败。此响应的工具调用已阻止，请重新生成。";
+              logger?.warn?.(`dsh-qoder-connect: ${code} — ${message}`);
               enqueue(encoder.encode(`data: ${JSON.stringify({ error: {
-                message: "Qoder 工具参数无效或含未还原的 Magpie 占位符。请使用原始值重试。",
-                code: "MAGPIE_TOOL_ARGUMENTS",
+                message: `${code}: ${message}`,
+                code,
               } })}\n\n`));
               reason = "network_error";
             }

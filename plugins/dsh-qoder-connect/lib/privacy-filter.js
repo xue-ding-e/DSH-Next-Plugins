@@ -31,6 +31,10 @@ const URL_ALIAS_LENGTH = URL_ALIAS_START.length + 16 + URL_ALIAS_SUFFIX.length;
 const URL_ALIAS_RE = /(?<![\w./:@-])(?:https?:\/\/)?magpie-url-([0-9a-f]{16})\.invalid\/?(?![\w./?#:%@&=+-])/giu;
 const URL_ALIAS_HINT_RE = /magpie-url-[^\s<>"'`\\{}]*\.invalid\b/iu;
 const RESPONSE_MARKERS_RE = new RegExp(`${URL_ALIAS_RE.source}|${PLACEHOLDER_RE.source}`, "giu");
+const ARGUMENT_MARKERS_RE = new RegExp(
+  `${URL_ALIAS_RE.source}|(?:https?:\\/\\/(?=\\{\\{MAGPIE_(?:PRIVATE_)?URL_))?${PLACEHOLDER_RE.source}|(?<![A-Z0-9_])MAGPIE_[A-Z0-9_]+_[0-9A-F]{16}(?![A-Z0-9_])`,
+  "giu",
+);
 const PROTECTED_RE = /\{\{MAGPIE_[A-Z0-9_]+_[0-9A-F]{16}\}\}|\bhttps?:\/\/[^\s<>"'`\\{}]+/giu;
 
 /** Whether text still contains a Magpie placeholder, including without braces. */
@@ -244,18 +248,29 @@ export function createPrivacyFilter(config = {}, dependencies = {}) {
   }
 
   function restoreArgument(text, values) {
-    // Qoder may add a scheme or omit the braces when it echoes a URL marker.
-    const urlMarker = /^(?:https?:\/\/)?\{{0,2}(MAGPIE_(?:PRIVATE_)?URL_[0-9A-F]{16})\}{0,2}$/iu.exec(text);
-    if (urlMarker !== null) {
-      const url = values.get(`{{${urlMarker[1].toUpperCase()}}}`);
-      if (url !== undefined) return url;
+    const parts = [];
+    let cursor = 0;
+    // Validate model-written markers before inserting original values, which
+    // can contain literal marker text themselves.
+    const unmatched = text.replace(ARGUMENT_MARKERS_RE, (match, urlHash, offset) => {
+      let key = urlHash === undefined ? match.replace(/^https?:\/\//iu, "").toUpperCase()
+        : `{{MAGPIE_PRIVATE_URL_${urlHash.toUpperCase()}}}`;
+      if (!key.startsWith("{{")) key = `{{${key}}}`;
+      const value = values.get(key);
+      if (value === undefined) return match;
+      parts.push(text.slice(cursor, offset), value);
+      cursor = offset + match.length;
+      return "";
+    });
+    if (hasPrivacyPlaceholder(unmatched)) {
+      throw new PrivacyFilterError(
+        "PRIVACY_FILTER_UNKNOWN_PLACEHOLDER",
+        "Qoder 返回了当前请求中不存在或已被改写的脱敏标记。此响应的工具调用已阻止，请重新生成。",
+      );
     }
-    const bareMarker = /^\{{0,2}(MAGPIE_[A-Z0-9_]+_[0-9A-F]{16})\}{0,2}$/iu.exec(text);
-    if (bareMarker !== null) {
-      const value = values.get(`{{${bareMarker[1].toUpperCase()}}}`);
-      if (value !== undefined) return value;
-    }
-    return restoreText(text, values);
+    if (cursor === 0) return text;
+    parts.push(text.slice(cursor));
+    return parts.join("");
   }
 
   /**

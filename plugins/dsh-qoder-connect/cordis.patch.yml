@@ -31,6 +31,7 @@
 #       cosyVersion: "1.1.75-hotfix.1"   # 覆盖客户端版本（服务端按它裁剪模型目录）
 #       # 复用 Magpie Settings → Privacy 下载的本地 privacy-filter 模型。
 #       # 默认关闭；启用后找不到 GGUF/pf-serve 或分类失败会阻止请求发给 Qoder。
+#       # 工具参数 JSON 无效或脱敏标记无法还原时，返回工具错误供 Agent 修正后继续。
 #       privacyFilter:
 #         enabled: true
 #         # 默认脱敏 HTTP(S) 链接，调用工具前在本地恢复。

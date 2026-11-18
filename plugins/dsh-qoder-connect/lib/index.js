@@ -14,6 +14,7 @@ import { PiAiAdapter } from "@deepseek-ai/dsh-llm-pi-ai";
 import { resolveImageAttachmentAccess, resolveRetryPolicy, RetryPolicySchema } from "@deepseek-ai/dsh-llm";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { updateQoderCli } from "./qoder-cli.js";
+import { installToolErrorRecovery } from "./tool-error-recovery.js";
 import {
   QODER_DISPLAY_NAME,
   QODER_PROVIDER,
@@ -29,8 +30,8 @@ import {
 
 /** Cordis 插件名。必须与 cordis.patch.yml 里的 `id` 一致。 */
 export const name = "llm-qoder";
-/** 注册 provider 之前必须先拿到模型注册表。 */
-export const inject = ["llm"];
+/** 注册 provider 之前需要模型注册表和工具错误恢复策略。 */
+export const inject = ["llm", "tools"];
 
 //#region 配置
 
@@ -353,7 +354,8 @@ export function apply(ctx, config) {
   const pats = createPatStore({ config: current });
   const tokens = createTokenManager({ pats, config: current, logger: ctx.logger });
   const catalog = createCatalog({ tokens, config: current, logger: ctx.logger });
-  const client = createQoderClient({ tokens, config: current, logger: ctx.logger });
+  const recoverToolArguments = installToolErrorRecovery(ctx);
+  const client = createQoderClient({ tokens, config: current, logger: ctx.logger, recoverToolArguments });
 
   const shim = createQoderShim({ client, catalog, logger: ctx.logger });
   const account = createQoderAccountClient({ tokens, config: current });

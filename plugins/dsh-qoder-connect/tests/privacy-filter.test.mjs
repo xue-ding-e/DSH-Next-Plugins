@@ -1,93 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
 import { createPrivacyFilter } from "../lib/privacy-filter.js";
 
-function u32(value) {
-  const out = Buffer.alloc(4);
-  out.writeUInt32LE(value >>> 0, 0);
-  return out;
-}
-
-function fakeSpawn() {
-  const calls = [];
-  const requests = [];
-  const spawn = (path, args) => {
-    calls.push({ path, args });
-    const child = new EventEmitter();
-    const stdout = new PassThrough();
-    let input = Buffer.alloc(0);
-    const stdin = new Writable({
-      write(chunk, _encoding, callback) {
-        input = Buffer.concat([input, chunk]);
-        drain();
-        callback();
-      },
-    });
-    child.stdout = stdout;
-    child.stdin = stdin;
-    child.stderr = new PassThrough();
-    child.exitCode = null;
-    child.signalCode = null;
-    child.kill = () => {
-      child.signalCode = "SIGTERM";
-      queueMicrotask(() => {
-        stdout.end();
-        child.emit("close");
-      });
-      return true;
-    };
-    stdout.write('{"device":"CPU","gpu":false,"ms":1}\n');
-
-    function drain() {
-      if (input.length < 4) return;
-      const count = input.readUInt32LE(0);
-      let offset = 4;
-      const texts = [];
-      for (let index = 0; index < count; index += 1) {
-        if (input.length < offset + 4) return;
-        const length = input.readUInt32LE(offset);
-        offset += 4;
-        if (input.length < offset + length) return;
-        texts.push(input.subarray(offset, offset + length).toString("utf8"));
-        offset += length;
-      }
-      requests.push(texts);
-      input = input.subarray(offset);
-      const output = [u32(0)];
-      for (const text of texts) {
-        const bytes = Buffer.from(text, "utf8");
-        const value = Buffer.from("Alice", "utf8");
-        const start = bytes.indexOf(value);
-        if (start < 0) {
-          output.push(u32(0));
-          continue;
-        }
-        output.push(u32(1), u32(start), u32(start + value.length), u32(0));
-        output.push(Buffer.from(["private_person".length]), Buffer.from("private_person", "utf8"));
-      }
-      stdout.write(Buffer.concat(output));
-      drain();
-    }
-    return child;
-  };
-  return { calls, requests, spawn };
-}
-
-function assets(t) {
-  const directory = mkdtempSync(join(tmpdir(), "dsh-qoder-privacy-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const modelPath = join(directory, "privacy-filter-q8-80efc1803eda.gguf");
-  const executablePath = join(directory, "pf-serve.exe");
-  writeFileSync(modelPath, "fixture");
-  writeFileSync(executablePath, "fixture");
-  return { directory, modelPath, executablePath };
-}
+import { assets, fakeSpawn } from "./privacy-fixture.mjs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("classifies request text through Magpie's pf-serve protocol and restores placeholders", async (t) => {
   const fixture = assets(t);
@@ -113,8 +32,9 @@ test("classifies request text through Magpie's pf-serve protocol and restores pl
 
   assert.equal(again.restoreArgument(placeholder), "Alice");
   assert.equal(again.restoreArgument(placeholder.slice(2, -2)), "Alice");
+  assert.equal(again.restoreArgument(`Write-Output '${placeholder.slice(2, -2)}'`), "Write-Output 'Alice'");
   const unrelated = await privacy.maskBody({ messages: [{ role: "user", content: "Separate request" }] });
-  assert.equal(unrelated.restoreArgument(placeholder), placeholder);
+  assert.throws(() => unrelated.restoreArgument(placeholder), { code: "PRIVACY_FILTER_UNKNOWN_PLACEHOLDER" });
   for (let split = 1; split < placeholder.length; split += 1) {
     const restorer = prepared.createResponseRestorer();
     assert.equal(restorer.restore("content", placeholder.slice(0, split)), "");
@@ -188,7 +108,7 @@ test("masks URLs in text, structured fields and escaped tool JSON by default", a
   assert.equal(prepared.restoreArgument(marker.toLowerCase()), url);
   assert.equal(prepared.restoreArgument(marker.slice("https://".length, -1)), url);
   const changedHost = marker.replace("://", "://other.");
-  assert.equal(prepared.restoreArgument(changedHost), changedHost);
+  assert.throws(() => prepared.restoreArgument(changedHost), { code: "PRIVACY_FILTER_UNKNOWN_PLACEHOLDER" });
   for (let split = 1; split < marker.length; split += 1) {
     const restorer = prepared.createResponseRestorer();
     const text = restorer.restore("content", marker.slice(0, split))
