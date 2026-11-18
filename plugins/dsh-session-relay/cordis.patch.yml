@@ -1,0 +1,10 @@
+# Explicitly installed, host-only chat tools. Existing subagent controls stay separate.
+- insert:
+    - id: session-relay
+      name: dsh-session-relay
+      config:
+        scope: same-directory
+        defaultDelivery: context
+        maxMessageBytes: 32768
+        maxReadChars: 12000
+        maxListItems: 50

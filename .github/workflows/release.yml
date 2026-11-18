@@ -34,12 +34,14 @@ jobs:
         with:
           node-version: '26.13.0'
           package-manager-cache: false
-      - name: Test browser and explicit BSK binding
+      - name: Test browser, BSK binding and session relay
         shell: pwsh
         run: |
           node --test plugin-sources/plugins/dsh-browser-control/tests/*.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test plugin-sources/plugins/dsh-bsk-bridge/tests/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test plugin-sources/plugins/dsh-session-relay/tests/*.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Pack and verify frozen locks
         env:
